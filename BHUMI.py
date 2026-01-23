@@ -3827,6 +3827,11 @@ def check_types(prog: Program):
 	crumb_map: Dict[str, Tuple[Optional[int], Optional[int], int, int]] = {}
 	funcs = {f.name: f for f in prog.funcs}
 	variant_map: Dict[str, Tuple[str, Optional[str]]] = {}
+	alias_creations: List[Tuple[str, str, Optional[int], Optional[int], int]] = []
+	alias_targets: Dict[str, set] = {}
+	alias_set: set = set()
+	alias_creation_counter = 0
+	crumb_order: Dict[str, int] = {}
 	def _inc_read(name: str, node_desc: Optional[str] = None):
 		if name not in crumb_map:
 			return
@@ -4209,6 +4214,7 @@ def check_types(prog: Program):
 			return f"{first_t}[{len(expr.elements)}]"
 		bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Unsupported expression: {expr}")
 	def check_stmt(stmt: Stmt, expected_ret: str, func: Optional[Func] = None):
+		nonlocal alias_creation_counter
 		if isinstance(stmt, VarDecl):
 			if env.lookup(stmt.name):
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Variable '{stmt.name}' already declared")
@@ -4222,6 +4228,17 @@ def check_types(prog: Program):
 			if stmt.expr:
 				expr_type = check_expr(stmt.expr)
 				_inc_write(stmt.name, node_desc=f"VarInit@{getattr(stmt,'lineno','?')}")
+				if isinstance(stmt.expr, AddressOf) and raw_typ.endswith('*'):
+					inner = stmt.expr.expr
+					if isinstance(inner, Var):
+						original_name = inner.name
+						alias_name = stmt.name
+						alias_creations.append(
+							(alias_name, original_name, getattr(stmt, 'lineno', None), getattr(stmt, 'col', None),
+							 alias_creation_counter))
+						alias_creation_counter += 1
+						alias_targets.setdefault(original_name, set()).add(alias_name)
+						alias_set.add(alias_name)
 				if expr_type == 'float' and raw_typ == 'float32':
 					stmt.expr = Cast('float32', stmt.expr)
 					expr_type = 'float32'
@@ -4245,6 +4262,17 @@ def check_types(prog: Program):
 					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Pointer-assign type mismatch: attempted to store '{expr_type}' into '{ptr_type}'")
 				return
 			var_type = env.lookup(stmt.name)
+			if isinstance(stmt.expr, AddressOf) and (var_type is not None and var_type.endswith('*')):
+				inner = stmt.expr.expr
+				if isinstance(inner, Var):
+					original_name = inner.name
+					alias_name = stmt.name if isinstance(stmt.name, str) else getattr(stmt.name, 'name', None)
+					alias_creations.append(
+						(alias_name, original_name, getattr(stmt, 'lineno', None), getattr(stmt, 'col', None),
+						 alias_creation_counter))
+					alias_creation_counter += 1
+					alias_targets.setdefault(original_name, set()).add(alias_name)
+					alias_set.add(alias_name)
 			if not var_type:
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Assign to undeclared variable '{stmt.name}'")
 			global_decl = next((g for g in prog.globals if g.name == stmt.name), None)
@@ -4284,7 +4312,7 @@ def check_types(prog: Program):
 				src_name = stmt.expr.name
 				if src_name != stmt.name:
 					src_typ = env.lookup(src_name)
-					if src_typ and src_typ.endswith('*'):
+					if src_typ and src_typ.endswith('*') and src_name in alias_set:
 						env.declare(src_name, "undefined")
 						if src_name in crumb_runtime:
 							crumb_runtime[src_name]['owned'] = False
@@ -4307,6 +4335,7 @@ def check_types(prog: Program):
 			if stmt.name in crumb_map:
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Variable '{stmt.name}' already crumbled")
 			crumb_map[stmt.name] = (stmt.max_reads, stmt.max_writes, 0, 0)
+			crumb_order[stmt.name] = getattr(stmt, "lineno", -1)
 			return
 		if isinstance(stmt, IndexAssign):
 			arr_name = stmt.array
@@ -4511,6 +4540,32 @@ def check_types(prog: Program):
 				reachable = False
 		env.pop()
 	over_errors = []
+	for (alias_name, original_name, lineno, col, idx) in alias_creations:
+		if alias_name is None:
+			bhumi_report_error(lineno, col, f"Internal alias error: alias name is None (original='{original_name}')")
+		if alias_name not in crumb_map:
+			bhumi_report_error(lineno, col, f"Alias '{alias_name}' must have a corresponding crumble({alias_name}) statement to declare mutability (e.g. crumble({alias_name})!r=...!w=...;)")
+	for original, aliases in alias_targets.items():
+		mutable_aliases = []
+		for a in aliases:
+			if a not in crumb_map:
+				continue
+			rmax, wmax, rc, wc = crumb_map[a]
+			allows_write = (wmax is None) or (wmax > 0)
+			if allows_write:
+				mutable_aliases.append(a)
+		if len(mutable_aliases) <= 1:
+			continue
+		def _score(alias_name):
+			return (crumb_order.get(alias_name, -1), next((idx for (an, _, _, _, idx) in alias_creations if an == alias_name), -1))
+		winner = max(mutable_aliases, key=_score)
+		for other in mutable_aliases:
+			if other == winner:
+				continue
+			rmax, wmax, rc, wc = crumb_map[other]
+			if (wmax is None) or (wmax > 0):
+				crumb_map[other] = (rmax, 0, rc, wc)
+				print(f"[Crawl-Checker]-[WARN]: revoked write permission on alias '{other}' because alias '{winner}' has more recent write permissions for original '{original}'.")
 	for name, (rmax, wmax, rc, wc) in list(crumb_map.items()):
 		over_r = (rc - rmax) if (rmax is not None and rc > rmax) else 0
 		over_w = (wc - wmax) if (wmax is not None and wc > wmax) else 0
