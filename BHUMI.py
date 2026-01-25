@@ -3015,14 +3015,27 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 				continue
 			ptr_tmp = new_tmp()
 			out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
+			asize_tmp = new_tmp()
 			cast_tmp = new_tmp()
 			out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-			out.append(f"  call void @free(i8* {cast_tmp})")
+			asize_tmp = new_tmp()
+			out.append(f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})")
+			is_zero_tmp = new_tmp()
+			out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
+			skip_lbl = new_label('free_skip')
+			do_lbl   = new_label('do_free')
+			out.append(f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}")
+			out.append(f"{do_lbl}:")
+			cast_tmp = new_tmp()
+			out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+			out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
 			out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
 			if nm in crumb_runtime:
 				crumb_runtime[nm]['owned'] = False
 			if nm in owned_vars:
 				owned_vars.discard(nm)
+			out.append(f"  br label %{skip_lbl}")
+			out.append(f"{skip_lbl}:")
 		autoregion_stack.pop()
 		symbol_table.pop()
 		return
@@ -3095,14 +3108,27 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 						continue
 					ptr_tmp = new_tmp()
 					out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
+					asize_tmp = new_tmp()
 					cast_tmp = new_tmp()
 					out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-					out.append(f"  call void @free(i8* {cast_tmp})")
+					asize_tmp = new_tmp()
+					out.append(f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})")
+					is_zero_tmp = new_tmp()
+					out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
+					skip_lbl = new_label('free_skip')
+					do_lbl   = new_label('do_free')
+					out.append(f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}")
+					out.append(f"{do_lbl}:")
+					cast_tmp = new_tmp()
+					out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+					out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
 					out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
 					if nm in crumb_runtime:
 						crumb_runtime[nm]['owned'] = False
 					if nm in owned_vars:
 						owned_vars.discard(nm)
+					out.append(f"  br label %{skip_lbl}")
+					out.append(f"{skip_lbl}:")
 		if val:
 			src_lang = infer_type(stmt.expr)
 			dst_lang = llvm_to_lang(ret_ty)
@@ -3116,18 +3142,31 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 		gen_expr(stmt.expr, out)
 	elif isinstance(stmt, ForgetStmt):
 		llvm_ty, llvm_name = symbol_table.lookup(stmt.varname)
-		ptr_tmp = new_tmp()
-		out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
 		if not llvm_ty.endswith("*"):
 			bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Cannot forget non-pointer type '{llvm_ty}'")
+		ptr_tmp = new_tmp()
+		out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
+		asize_tmp = new_tmp()
 		cast_tmp = new_tmp()
 		out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-		out.append(f"  call void @free(i8* {cast_tmp})")
+		asize_tmp = new_tmp()
+		out.append(f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})")
+		is_zero_tmp = new_tmp()
+		out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
+		skip_lbl = new_label('free_skip')
+		do_lbl   = new_label('do_free')
+		out.append(f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}")
+		out.append(f"{do_lbl}:")
+		cast_tmp = new_tmp()
+		out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+		out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
 		out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
 		if stmt.varname in crumb_runtime:
 			crumb_runtime[stmt.varname]['owned'] = False
 		if stmt.varname in owned_vars:
 			owned_vars.discard(stmt.varname)
+		out.append(f"  br label %{skip_lbl}")
+		out.append(f"{skip_lbl}:")
 	elif isinstance(stmt, Match):
 		raw_ty = infer_type(stmt.expr)
 		enum_name = None
@@ -4218,7 +4257,7 @@ def check_types(prog: Program):
 			if stmt.expr:
 				expr_type = check_expr(stmt.expr)
 				_inc_write(stmt.name, node_desc=f"VarInit@{getattr(stmt,'lineno','?')}")
-				if isinstance(stmt.expr, AddressOf) and raw_typ.endswith('*'):
+				if isinstance(stmt.expr, AddressOf) and (raw_typ.endswith('*') or raw_typ == 'string'):
 					inner = stmt.expr.expr
 					if isinstance(inner, Var):
 						original_name = inner.name
@@ -4313,7 +4352,7 @@ def check_types(prog: Program):
 			ptr_typ = env.lookup(stmt.varname)
 			if ptr_typ is None:
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Cannot forget undeclared variable '{stmt.varname}'")
-			if not ptr_typ.endswith('*'):
+			if not (ptr_typ.endswith('*') or ptr_typ == 'string'):
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Cannot forget non-pointer variable '{stmt.varname}' of type '{ptr_typ}'")
 			if ptr_typ == "undefined":
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Compile-time error: double free / forget on variable '{stmt.varname}'")
