@@ -3590,7 +3590,7 @@ sleep:
 done:
   ret void
 }
-	"""
+"""
 	runtime_block_noop = """
 @.alloc_magic = global i64 0
 define void @bhumi_oob_abort() {
@@ -3637,7 +3637,7 @@ define void @bhumi_block_until_complete(i8* %handle) {
 entry:
   ret void
 }
-	"""
+"""
 	struct_llvm_defs: List[str] = []
 	for sdef in prog.structs:
 		field_tys: List[str] = []
@@ -3735,10 +3735,8 @@ entry:
 		lines.append("  %isnull = icmp eq i8** %argvp, null")
 		lines.append("  br i1 %isnull, label %null_case, label %check_bounds")
 		lines.append("null_case:")
-		lines.append("  %src = getelementptr inbounds [5 x i8], [5 x i8]* @.str_null, i32 0, i32 0")
-		lines.append("  %alloc0 = call i8* @malloc(i64 5)")
-		lines.append("  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %alloc0, i8* %src, i64 5, i1 false)")
-		lines.append("  ret i8* %alloc0")
+		lines.append('  %src = getelementptr inbounds [5 x i8], [5 x i8]* @.str_null, i32 0, i32 0')
+		lines.append("  ret i8* %src")
 		lines.append("check_bounds:")
 		lines.append("  %argc = load i64, i64* @bhumi_argc_global")
 		lines.append("  %neg = icmp slt i64 %idx, 0")
@@ -3746,18 +3744,12 @@ entry:
 		lines.append("  %oob = or i1 %neg, %uge")
 		lines.append("  br i1 %oob, label %null_case2, label %in_bounds")
 		lines.append("null_case2:")
-		lines.append("  %src2 = getelementptr inbounds [5 x i8], [5 x i8]* @.str_null, i32 0, i32 0")
-		lines.append("  %alloc1 = call i8* @malloc(i64 5)")
-		lines.append("  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %alloc1, i8* %src2, i64 5, i1 false)")
-		lines.append("  ret i8* %alloc1")
+		lines.append('  %src2 = getelementptr inbounds [5 x i8], [5 x i8]* @.str_null, i32 0, i32 0')
+		lines.append("  ret i8* %src2")
 		lines.append("in_bounds:")
 		lines.append("  %gep = getelementptr inbounds i8*, i8** %argvp, i64 %idx")
 		lines.append("  %val = load i8*, i8** %gep")
-		lines.append("  %len = call i64 @strlen(i8* %val)")
-		lines.append("  %allocsz = add i64 %len, 1")
-		lines.append("  %alloc2 = call i8* @malloc(i64 %allocsz)")
-		lines.append("  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %alloc2, i8* %val, i64 %allocsz, i1 false)")
-		lines.append("  ret i8* %alloc2")
+		lines.append("  ret i8* %val")
 		lines.append("}")
 		lines.append("")
 		builtins_emitted = True
