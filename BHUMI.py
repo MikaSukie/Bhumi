@@ -90,7 +90,7 @@ KEYWORDS = {
 	'pin', 'crumble', 'null', 'continue', 'break',
 	'async', 'await', 'uint', 'uint8', 'uint16', 'uint32', 'uint64',
 	'float32', 'autoregion', 'except', 'vasync', 'vawait',
-	'typeswitch', 'case', 'fallback'
+	'typeswitch', 'typecase', 'fallback'
 	}
 SINGLE_CHARS = {
 	'(': 'LPAREN',   ')': 'RPAREN',   '{': 'LBRACE',   '}': 'RBRACE',
@@ -1182,11 +1182,11 @@ class Parser:
 		cases: List[TypeSwitchCase] = []
 		fallback_body: Optional[List[Stmt]] = None
 		while self.peek().kind != 'RBRACE':
-			if self.peek().kind == 'CASE':
+			if self.peek().kind == 'TYPECASE':
 				self.bump()
 				self.expect('LPAREN')
 				if self.peek().kind not in TYPE_TOKENS and self.peek().kind != 'IDENT':
-					bhumi_report_error(self.peek().line, self.peek().col, "Expected type after case(")
+					bhumi_report_error(self.peek().line, self.peek().col, "Expected type after typecase(")
 				case_typ = self.bump().value
 				if self.peek().kind == 'AMP' or self.peek().kind == 'STAR':
 					while self.match('STAR') or self.match('AMP'):
