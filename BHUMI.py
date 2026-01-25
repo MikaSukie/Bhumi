@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
- * GPL2.0 license
-"""
+""" [-GPL2.0 license-] """
 import re, os, argparse, sys
 from typing import List, Optional, Tuple, Union, Dict, Any, NoReturn
 from dataclasses import dataclass
