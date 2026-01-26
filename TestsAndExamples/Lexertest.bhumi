@@ -1,0 +1,98 @@
+import C_std;
+
+/* EXPERIMENTAL (THIS SNIPPET IS NOT WRITTEN BY ME) will be tested eventually.
+enum Keyword {
+    Fn; Let; If; Else; Match; Return; Struct; Enum; Import;
+}
+
+enum Token {
+    Ident: string;
+    IntLit: int;
+    StringLit: string;
+
+    Plus;
+    Minus;
+    Star;
+    Slash;
+
+    LParen;
+    RParen;
+
+    Keyword: Keyword;
+
+    EOF;
+}
+*/
+
+
+fn main() <void> {
+    printnl("READ FILE TEST");
+    autoregion {
+        string sourcefile = try_read_file("main.bhumi");
+        int index = -1;
+        // 4792 EOF max
+        printnl(tostring(charat(index, sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
+        newline();
+        // printnl(sourcefile);
+    }
+
+    printnl("GET MAX LENGTH TEST");
+    autoregion {
+        string sourcefile = try_read_file("main.bhumi");
+        int index = 0;
+        while (!streq(charat(index, sourcefile), "EOF")) {
+            index += 1;
+        }
+        printnl("index: " + tostring(index));
+        newline();
+    }
+
+    printnl("DETECT KEYWORDS");
+    autoregion {
+        string buf = sb_create();
+        string sourcefile = try_read_file("main.bhumi");
+        int index = 0;
+        while (!isspace_at(index, sourcefile)) {
+            buf = sb_append_str(buf, charat(index, sourcefile));
+            index += 1;
+        }
+        buf = sb_finish(buf);
+        printnl(buf);
+        printnl("index: " + tostring(index));
+        printnl("kw length: " + tostring(slength(buf)));
+        newline();
+    }
+
+    printnl("NEWLINE DETECTION");
+    autoregion {
+        int index = 0;
+        int nlc = 0;
+        string sourcefile = try_read_file("main.bhumi");
+        while (!streq(charat(index, sourcefile), "EOF")) {
+            index += 1;
+            if (streq(charat(index, sourcefile), "NL")) {
+                nlc += 1;
+            }
+        }
+
+        printnl(tostring(nlc) + " newlines");
+    }
+
+}
+
+// ─── String Builder example ────────────────────────────────────────────────
+    /*
+    string builder = sb_create();
+    builder = sb_append_str(builder, tostr("Hello, "));
+    builder = sb_append_str(builder, tostr("Orcat!  Number="));
+    builder = sb_append_int(builder, 42);
+    builder = sb_append_str(builder, tostr(", Pi="));
+    builder = sb_append_float(builder, 3.14159);
+    builder = sb_append_str(builder, tostr(", flag="));
+    builder = sb_append_bool(builder, false);
+
+    string result = sb_finish(builder);
+    printnl(result);
+    printnl("\n");
+// ─── String Builder example ────────────────────────────────────────────────
+*/
