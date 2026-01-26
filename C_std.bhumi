@@ -1,0 +1,126 @@
+/* start of STDLIB */
+pub extern fn sb_create()                            <string>;
+pub extern fn sb_append_str(string b, string s)      <string>;
+pub extern fn sb_append_int(string b, int x)         <string>;
+pub extern fn sb_append_float(string b, float f)     <string>;
+pub extern fn sb_append_bool(string b, bool bb)      <string>;
+pub extern fn sb_append_float32(string b, float32 f) <string>;
+pub extern fn sb_finish(string b)                    <string>;
+
+pub extern fn itostr(int i)    <string>;
+pub extern fn i8tostr(int8 i)    <string>;
+pub extern fn i16tostr(int16 i)    <string>;
+pub extern fn i32tostr(int32 i)    <string>;
+pub extern fn i64tostr(int64 i)    <string>;
+pub extern fn f32tostr(float32 f)  <string>;
+pub extern fn ftostr(float f)<string>;
+pub extern fn btostr(bool b)  <string>;
+pub extern fn tostr(string s)<string>;
+
+pub fn safestring(string s) <string> {
+    return sb_create() + s;
+}
+pub extern fn tofloat(int x) <float>;
+pub extern fn toint(float x) <int>;
+pub extern fn toint_round(float x) <int>;
+pub extern fn rmtrz(float x) <string>;
+pub extern fn contains(string var, string detection_char) <bool>;
+pub extern fn countcontain(string x, string detection_char) <int>;
+pub fn empty() <string> { return tostr(""); }
+
+pub extern fn system(string s)<int>;
+pub extern fn ilength(int integer)<int>;
+pub extern fn flength(float decimal)<int>;
+pub extern fn slength(string str)<int>;
+pub extern fn streq(string str1, string str2) <bool>;
+pub extern fn get_os() <string>;
+pub extern fn get_os_max_bits() <string>;
+pub extern fn tal(string s) <string>;
+pub extern fn tac(string s) <string>;
+
+pub extern fn fcasti8(float d) <int8>;
+pub extern fn fcasti16(float d) <int16>;
+pub extern fn fcasti32(float d) <int32>;
+pub extern fn fcasti64(float d) <int64>;
+pub extern fn fcasti(float d) <int>;
+
+pub extern fn i8castf(int8 i) <float>;
+pub extern fn i16castf(int16 i) <float>;
+pub extern fn i32castf(int32 i) <float>;
+pub extern fn i64castf(int64 i) <float>;
+pub extern fn icastf(int i) <float>;
+
+pub extern fn input(string input) <string>;
+pub extern fn iinput(string input) <int>;
+pub extern fn binput(string input) <bool>;
+pub extern fn finput(string input) <float>;
+pub extern fn sinput(string input) <string>;
+
+pub extern fn print(string s) <void>;
+
+pub extern fn read_file(string path) <string>;
+pub extern fn write_file(string path, string content) <bool>;
+pub extern fn append_file(string path, string content) <bool>;
+pub extern fn file_exists(string path) <bool>;
+pub extern fn read_lines(string path) <string>;
+pub extern fn free_str(string s) <void>;
+
+pub extern fn charat(int i, string s) <string>;
+pub extern fn isalnum_at(int i, string s) <bool>;
+pub extern fn isspace_at(int i, string s) <bool>;
+pub extern fn isalpha_at(int i, string s) <bool>;
+pub extern fn isnum_at(int i, string s) <bool>;
+
+pub fn try_read_file(string path) <string> {
+    if (file_exists(path)) {
+        return read_file(path);
+    } else {
+        return "";
+    }
+}
+
+pub fn save_text(string path, string text) <bool> {
+    return write_file(path, text);
+}
+
+pub fn add_text(string path, string text) <bool> {
+    return append_file(path, text);
+}
+
+pub fn printnl(string s) <void> {
+    print(s); newline();
+}
+
+pub fn newline() <void> {
+    print("\n");
+}
+
+pub fn [T] tostring(T candidate) <string> {
+    typeswitch(T) {
+        typecase(int) {
+            if (streq(get_os_max_bits(), "64")) {
+                return i64tostr(candidate);
+            } else if (streq(get_os_max_bits(), "32")) {
+                return i32tostr(candidate);
+            } else {
+                return itostr(candidate);
+            }
+        }
+        typecase(float) { return ftostr(candidate); }
+        typecase(bool)  { return btostr(candidate); }
+        typecase(string){ return tostr(candidate);  }
+    }
+    return "tostring has errored as no matching typecases were found.";
+}
+
+pub fn [F] etostring(F candidate) <string> {
+    typeswitch(F) {
+        typecase(int8)  { return i8tostr(candidate);  }
+        typecase(int16) { return i16tostr(candidate); }
+        typecase(int32) { return i32tostr(candidate); }
+        typecase(int64) { return i64tostr(candidate); }
+    }
+    return tostring(candidate);
+}
+
+/* end of STDLIB */
