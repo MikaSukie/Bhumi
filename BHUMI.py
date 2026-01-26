@@ -3011,6 +3011,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			if not owned_here:
 				continue
 			llvm_ty, llvm_name = symbol_table.lookup(nm)
+			if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or llvm_name in symbol_table.scopes[-1])):
+				continue
 			if not llvm_ty.endswith('*'):
 				continue
 			ptr_tmp = new_tmp()
@@ -3104,6 +3106,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 					if not owned_here:
 						continue
 					llvm_ty, llvm_name = symbol_table.lookup(nm)
+					if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or llvm_name in symbol_table.scopes[-1])):
+						continue
 					if not llvm_ty.endswith('*'):
 						continue
 					ptr_tmp = new_tmp()
@@ -3183,10 +3187,18 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			enum_name = base
 		else:
 			raw_llvm = type_map.get(raw_ty, raw_ty)
-			for high, low in type_map.items():
-				if low == raw_llvm and high in enum_variant_map:
-					enum_name = high
-					break
+			candidates = [high for high, low in type_map.items() if low == raw_llvm and high in enum_variant_map]
+			if len(candidates) == 1:
+				enum_name = candidates[0]
+			elif candidates:
+				case_variant_names = {case.variant for case in stmt.cases}
+				chosen = None
+				for cand in candidates:
+					cand_variants = {v[0] for v in enum_variant_map[cand]}
+					if case_variant_names.issubset(cand_variants):
+						chosen = cand
+						break
+				enum_name = chosen if chosen is not None else candidates[0]
 		if enum_name is None:
 			bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Match expression is not an enum type: {raw_ty}")
 		llvm_enum_ty = type_map.get(enum_name, None)
@@ -5073,3 +5085,4 @@ def main():
 		f.write(llvm)
 if __name__ == "__main__":
 	main()
+	
