@@ -377,11 +377,11 @@ int countcontain(const char* str, const char* substr) {
 }
 
 char* charat(int64_t idx, const char* s) {
-    if (!s) return safe_strdup("");
+    if (!s) return safe_strdup("NULL");
     size_t len = strlen(s);
     if (idx == -1)                    return safe_strdup("SOF");
     if (idx == (int64_t)len)          return safe_strdup("EOF");
-    if (idx < 0 || (size_t)idx >= len) return safe_strdup("");
+    if (idx < 0 || (size_t)idx >= len) return safe_strdup("OOB");
     char c = s[(size_t)idx];
     if (c == '\n' || c == '\r')
         return safe_strdup("NL");
