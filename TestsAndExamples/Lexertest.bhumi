@@ -30,8 +30,8 @@ fn main() <void> {
     autoregion {
         string sourcefile = try_read_file("main.bhumi");
         int index = -1;
-        // 4792 EOF max
         printnl(tostring(charat(index, sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
+        printnl(tostring(charat(slength(sourcefile) , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
         newline();
         // printnl(sourcefile);
     }
