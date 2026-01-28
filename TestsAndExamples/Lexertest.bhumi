@@ -24,7 +24,6 @@ enum Token {
 }
 */
 
-
 fn main() <void> {
     printnl("READ FILE TEST");
     autoregion {
@@ -53,15 +52,26 @@ fn main() <void> {
         string buf = sb_create();
         string sourcefile = try_read_file("main.bhumi");
         int index = 0;
-        while (!isspace_at(index, sourcefile)) {
-            buf = sb_append_str(buf, charat(index, sourcefile));
-            index += 1;
+        bool qswitch = false;
+        while (!streq(charat(index, sourcefile), "EOF")) {
+            while (!isspace_at(index, sourcefile) || !isspace_at(index, sourcefile) && qswitch) {
+                buf = sb_append_str(buf, charat(index, sourcefile));
+                if (streq(charat(index, sourcefile), "\"") && !streq(charat(index - 1, sourcefile), "\\")) { qswitch = !qswitch; }
+                index += 1;
+            }
+            buf = sb_finish(buf);
+            printnl(buf);
+            int buflength = slength(buf);
+            printnl("index: " + tostring(index));
+            printnl("kw length: " + tostring(slength(buf)));
+            buf = sb_create();
+            newline();
+            while (isspace_at(index, sourcefile)) {
+                if (!streq(charat(index, sourcefile), "EOF")) {
+                    index += 1;
+                }
+            }
         }
-        buf = sb_finish(buf);
-        printnl(buf);
-        printnl("index: " + tostring(index));
-        printnl("kw length: " + tostring(slength(buf)));
-        newline();
     }
 
     printnl("NEWLINE DETECTION");
@@ -73,7 +83,6 @@ fn main() <void> {
             index += 1;
             if (streq(charat(index, sourcefile), "NL")) {
                 nlc += 1;
-				printnl(charat(index, sourcefile));
             }
         }
 
