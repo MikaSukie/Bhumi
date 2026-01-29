@@ -4602,7 +4602,7 @@ def check_types(prog: Program):
 		if alias_name is None:
 			bhumi_report_error(lineno, col, f"Internal alias error: alias name is None (original='{original_name}')")
 		if alias_name not in crumb_map:
-			bhumi_report_error(lineno, col, f"Alias '{alias_name}' must have a corresponding crumble({alias_name}) statement to declare mutability (e.g. crumble({alias_name})!r=...!w=...;)")
+			bhumi_report_error(lineno, col, f"Alias '{alias_name}' must have a corresponding crumble({alias_name}) statement to declare mutability (e.g. crumble({alias_name})!r=<read_count>!w=<write_count>;)")
 	for original, aliases in alias_targets.items():
 		mutable_aliases = []
 		for a in aliases:
@@ -5102,4 +5102,3 @@ def main():
 		f.write(llvm)
 if __name__ == "__main__":
 	main()
-	
