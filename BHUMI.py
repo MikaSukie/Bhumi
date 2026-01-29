@@ -3011,7 +3011,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			if not owned_here:
 				continue
 			llvm_ty, llvm_name = symbol_table.lookup(nm)
-			if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or llvm_name in symbol_table.scopes[-1])):
+			if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or any(val[1] == llvm_name for val in symbol_table.scopes[ctx['scope_index']].values()))):
 				continue
 			if not llvm_ty.endswith('*'):
 				continue
@@ -3106,7 +3106,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 					if not owned_here:
 						continue
 					llvm_ty, llvm_name = symbol_table.lookup(nm)
-					if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or llvm_name in symbol_table.scopes[-1])):
+					if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or any(val[1] == llvm_name for val in symbol_table.scopes[scope_idx].values()))):
 						continue
 					if not llvm_ty.endswith('*'):
 						continue
@@ -3472,7 +3472,7 @@ ok_alloc:
   store i64 %global_magic, i64* %footer_ptr_i64
   ret i8* %user_ptr
 }
-define void @bhumi_free(i8* %userptr) {
+define void @bhumi_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
   br i1 %is_null, label %ret_void, label %check_hdr
@@ -3491,17 +3491,17 @@ free_ok:
   %size_slot = getelementptr i8, i8* %raw_hdr, i64 8
   %size_i64 = bitcast i8* %size_slot to i64*
   %sz = load i64, i64* %size_i64
+  %is_neg = icmp slt i64 %sz, 0
+  br i1 %is_neg, label %free_fail, label %check_footer
+check_footer:
   %footer_loc = getelementptr i8, i8* %userptr, i64 %sz
   %footer_i64 = bitcast i8* %footer_loc to i64*
   %footer_val = load i64, i64* %footer_i64
   %ok2 = icmp eq i64 %footer_val, %global_magic_cmp
-  br i1 %ok2, label %free_ok2, label %free_fail2
-free_fail2:
-  %tmp_puts3 = call i32 @puts(i8* getelementptr inbounds ([67 x i8], [67 x i8]* @.heap_msg, i32 0, i32 0))
-  call void @exit(i32 1)
-  unreachable
+  br i1 %ok2, label %free_ok2, label %free_fail
 free_ok2:
   store i64 0, i64* %hdr_i64
+  store i64 0, i64* %footer_i64
   %rawptr = bitcast i8* %raw_hdr to i8*
   call void @free(i8* %rawptr)
   ret void
@@ -3515,7 +3515,7 @@ entry:
   call void @exit(i32 1)
   unreachable
 }
-define i64 @bhumi_alloc_size(i8* %userptr) {
+define i64 @bhumi_alloc_size(i8* %userptr) readonly nounwind willreturn {
 entry:
   %is_null = icmp eq i8* %userptr, null
   br i1 %is_null, label %ret_zero, label %cont
@@ -3530,6 +3530,12 @@ ok2:
   %size_slot = getelementptr i8, i8* %raw_hdr, i64 8
   %size_i64 = bitcast i8* %size_slot to i64*
   %sz = load i64, i64* %size_i64
+  %footer_loc = getelementptr i8, i8* %userptr, i64 %sz
+  %footer_i64 = bitcast i8* %footer_loc to i64*
+  %footer_val = load i64, i64* %footer_i64
+  %ok_footer = icmp eq i64 %footer_val, %global_magic_cmp
+  br i1 %ok_footer, label %ret_sz, label %ret_zero
+ret_sz:
   ret i64 %sz
 ret_zero:
   ret i64 0
@@ -5085,4 +5091,3 @@ def main():
 		f.write(llvm)
 if __name__ == "__main__":
 	main()
-	
