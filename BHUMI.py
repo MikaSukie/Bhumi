@@ -2914,6 +2914,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 				addr_token = f"%{ir_name}_addr"
 			vn = stmt.name
 			cr = crumb_runtime.get(vn)
+			handled_write_exhaustion_new_alloc = False
 			if cr is not None:
 				cr['wc'] = (cr.get('wc', 0) or 0) + 1
 				if cr.get('wmax') is not None and cr['wc'] == cr['wmax'] and cr.get('owned'):
@@ -2924,6 +2925,14 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 					out.append(f"  call void @free(i8* {cast_tmp})")
 					cr['owned'] = False
 					owned_vars.discard(vn)
+				elif (cr.get('wmax') is not None and cr['wc'] == cr['wmax'] and not cr.get('owned') and isinstance(stmt.expr, Call)):
+					cast_tmp2 = new_tmp()
+					out.append(f"  {cast_tmp2} = bitcast {llvm_ty} {val} to i8*")
+					out.append(f"  call void @free(i8* {cast_tmp2})")
+					out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+					cr['owned'] = False
+					owned_vars.discard(vn)
+					handled_write_exhaustion_new_alloc = True
 			curfn = globals().get('__bhumi_current_codegen_fn', None)
 			if curfn is not None and getattr(curfn, "is_vasync", False):
 				cap = getattr(curfn, "_vasync_captured", set()) or set()
@@ -2933,6 +2942,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 					out.append("  call void @bhumi_vvolatile_abort()")
 					out.append("  unreachable")
 					return
+			if handled_write_exhaustion_new_alloc:
+				return
 			out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {addr_token}")
 			if isinstance(stmt.expr, Call):
 				ret_t = infer_type(stmt.expr)
@@ -5091,3 +5102,4 @@ def main():
 		f.write(llvm)
 if __name__ == "__main__":
 	main()
+	
