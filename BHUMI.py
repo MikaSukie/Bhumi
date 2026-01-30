@@ -4311,13 +4311,53 @@ def check_types(prog: Program):
 			return
 		if isinstance(stmt, Assign):
 			if isinstance(stmt.name, UnaryDeref):
+				def _find_var_in_expr(node, _depth=0, _max_depth=10):
+					if node is None or _depth > _max_depth:
+						return None
+					if isinstance(node, Var):
+						return node.name
+					maybe_name = getattr(node, "name", None)
+					if isinstance(maybe_name, str):
+						return maybe_name
+					child_attrs = ("expr", "value", "arg", "target", "ptr", "base", "operand", "inner", "v", "var", "lhs", "rhs", "obj")
+					for attr in child_attrs:
+						if hasattr(node, attr):
+							child = getattr(node, attr)
+							if isinstance(child, (list, tuple)) and child:
+								for c in child:
+									vn = _find_var_in_expr(c, _depth + 1, _max_depth)
+									if vn:
+										return vn
+								continue
+							vn = _find_var_in_expr(child, _depth + 1, _max_depth)
+							if vn:
+								return vn
+					for k, v in getattr(node, "__dict__", {}).items():
+						if k.startswith("_"):
+							continue
+						if isinstance(v, (list, tuple)):
+							for c in v:
+								vn = _find_var_in_expr(c, _depth + 1, _max_depth)
+								if vn:
+									return vn
+						else:
+							vn = _find_var_in_expr(v, _depth + 1, _max_depth)
+							if vn:
+								return vn
+					return None
+				base_var = _find_var_in_expr(stmt.name.ptr)
 				ptr_type = check_expr(stmt.name.ptr)
 				if not ptr_type.endswith('*'):
 					bhumi_report_error(getattr(stmt, "lineno", None), None, f"Dereferencing non-pointer type '{ptr_type}'")
 				pointee = ptr_type[:-1]
 				expr_type = check_expr(stmt.expr)
 				if expr_type != pointee:
-					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Pointer-assign type mismatch: attempted to store '{expr_type}' into '{ptr_type}'")
+					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, 'col', None), f"Type mismatch: attempted to store '{expr_type}' into '{ptr_type}'")
+				if base_var is not None and base_var in crumb_map:
+					rmax, wmax, rc, wc = crumb_map[base_var]
+					if rc > 0:
+						crumb_map[base_var] = (rmax, wmax, rc - 1, wc)
+					_inc_write(base_var, node_desc=f"UnaryDerefWrite@{getattr(stmt, 'lineno', None)}")
 				return
 			var_type = env.lookup(stmt.name)
 			if isinstance(stmt.expr, AddressOf) and (var_type is not None and var_type.endswith('*')):
@@ -5102,3 +5142,4 @@ def main():
 		f.write(llvm)
 if __name__ == "__main__":
 	main()
+	
