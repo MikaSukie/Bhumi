@@ -1,0 +1,414 @@
+import C_std;
+
+// ----------------- nottest -----------------
+fn test_nottest() <int> {
+    bool b = true;
+    if (!b) {
+        print("should not print\n");
+    } else {
+        print("works!\n");
+    }
+    return 0;
+}
+
+// ----------------- args -----------------
+pub fn test_args() <int> {
+    int argc = bhumi_argc();
+    print(tostring(argc) + "\n");
+    print(tostring("args: ") + tostring(bhumi_argv(1))); newline();
+    return 0;
+}
+
+// ----------------- arrayExample -----------------
+pin string[3] arrExample_gloarr1;
+
+pub fn test_arrayExample() <int> {
+    string[7] arr1;
+    arr1[2] = "test";
+    print(arr1[2]);
+
+    newline();
+
+    arrExample_gloarr1[1] = "testar";
+    print(arrExample_gloarr1[1]);
+    /*
+    OOB test
+    print(arr1[8]);
+    print(gloarr1[8]);
+    */
+    return 0;
+}
+
+// ----------------- cashregisterexample -----------------
+pin string cash_item = "";
+pin float cash_price = 0.0;
+pin int cash_quantity = 0;
+pin string cash_currency = "$";
+pin float cash_total = 0.0;
+
+pub fn cash_process() <void> {
+    cash_item     = sinput("What item would you like to buy?: ");
+    cash_price    = finput("What is the price for each?: ");
+    cash_quantity = iinput("How many would you like?: ");
+    cash_total    = cash_price * tofloat(cash_quantity);
+    string possesive = "";
+    if (cash_quantity > 1) {
+        possesive = "s";
+    }
+    print("You have bought " + tostring(cash_quantity) + " " + cash_item+possesive + " which costed " + cash_currency + rmtrz(cash_total) + "\n");
+}
+
+pub fn test_cashregisterexample() <int> {
+    cash_process();
+    return 0;
+}
+
+// ----------------- continueandbreaktest -----------------
+pub fn test_continueandbreaktest() <int> {
+    int i = 0;
+    while (i < 5) {
+        i = i + 1;
+
+        if (i == 3) {
+            print("SKIPPING\n");
+            continue;
+        }
+
+        if (i == 4) {
+            print("BREAKING\n");
+            break;
+        }
+
+        print("i is ");
+        print(tostring(i));
+        print("\n");
+    }
+
+    return 0;
+}
+
+// ----------------- filemain -----------------
+fn test_filemain_inner() <int> {
+    string path = "example.txt";
+    string msg = "Hello bhumi!\n";
+    bool ok = save_text(path, msg);
+    if (ok) {
+        print("File written.\n");
+    }
+
+    string data = read_lines(path);
+    print(data);
+    free_str(data);
+    return 0;
+}
+pub fn test_filemain() <int> {
+    return test_filemain_inner();
+}
+
+// ----------------- generictypesandstructs -----------------
+fn [T] identity(T x) <T> {
+    return x;
+}
+
+struct Person {
+    string name;
+    int age;
+}
+
+pub fn greet_person(Person* p) <void> {
+    print("Hello, ");
+    print(p.name);
+    print("!\n");
+}
+
+pub fn test_generictypesandstructs() <int> {
+    Person* p = Person {
+        name: "Alice";
+        age: 30;
+    };
+    greet_person(p);
+    return 0;
+}
+
+// ----------------- getosandbits -----------------
+pub fn test_getosandbits() <int> {
+    print(get_os()); newline();
+    print(get_os_max_bits()); newline();
+    return 0;
+}
+
+// ----------------- inputexample -----------------
+fn test_inputexample_inner() <int> {
+    int res = iinput("what is your age? \n");
+    print("you're " + tostring(res) + " years old.\n");
+    return 0;
+}
+pub fn test_inputexample() <int> {
+    return test_inputexample_inner();
+}
+
+// ----------------- mathoptest -----------------
+pub fn test_mathoptest() <int> {
+    int x = 6;
+
+    x += 4;
+    print("x += 4: ");
+    print(tostring(x));
+    print("\n");
+
+    x -= 2;
+    print("x -= 2: ");
+    print(tostring(x));
+    print("\n");
+
+    x *= 3;
+    print("x *= 3: ");
+    print(tostring(x));
+    print("\n");
+
+    x /= 2;
+    print("x /= 2: ");
+    print(tostring(x));
+    print("\n");
+
+    x %= 5;
+    print("x %= 5: ");
+    print(tostring(x));
+    print("\n");
+
+    x &= 3;
+    print("x &= 3: ");
+    print(tostring(x));
+    print("\n");
+
+    x |= 8;
+    print("x |= 8: ");
+    print(tostring(x));
+    print("\n");
+
+    x ^= 1;
+    print("x ^= 1: ");
+    print(tostring(x));
+    print("\n");
+
+    x <<= 2;
+    print("x <<= 2: ");
+    print(tostring(x));
+    print("\n");
+
+    x >>= 1;
+    print("x >>= 1: ");
+    print(tostring(x));
+    print("\n");
+
+        x = 6;
+    int y = (x & 3) | 8;
+    int z = y >> 1;
+    print("(x & 3) | 8: ");
+    print(tostring(y)); print("\n");
+    print("y >> 1: ");
+    print(tostring(z)); print("\n");
+
+    return x;
+}
+
+// ----------------- memtest -----------------
+pub fn allocate_and_free_test() <void> {
+    autoregion {
+        int* ptr1 = malloc(8);
+        int* ptr2 = malloc(8);
+        int* ptr3 = malloc(8);
+        int* ptr4 = malloc(8);
+        int* ptr5 = malloc(8);
+
+        *ptr1 = 1;
+        *ptr2 = 2;
+        *ptr3 = 3;
+
+        print("Assigned values to first 3 pointers."); newline();
+
+        autoregion {
+            int* nested1 = malloc(8);
+            int* nested2 = malloc(8);
+            *nested1 = 100;
+            *nested2 = 200;
+            print("Nested allocations done."); newline();
+        }
+
+        print("Exited nested autoregion."); newline();
+
+        int* ptr6 = malloc(8);
+        int* ptr7 = malloc(8);
+        *ptr6 = 6;
+        *ptr7 = 7;
+
+        print("More allocations at top level."); newline();
+    }
+    print("Exited top-level autoregion."); newline();
+
+    print("Starting crumb autofree test"); newline();
+
+    int* ptrx;
+    crumble(ptrx)!r=0!w=1;
+    ptrx = malloc(8);
+
+    print("Manual forget");
+    int* ptry = malloc(8);
+    forget(ptry); newline();
+}
+
+pub fn test_memtest() <int> {
+    allocate_and_free_test();
+    return 0;
+}
+
+// ----------------- C_RuntimeUnionTest -----------------
+pub fn test_C_RuntimeUnionTest() <int> {
+    int a = Umake_int(123);
+    int b = Umake_float(3.14);
+    int c = Umake_bool(true);
+    int d = Umake_string("hello Bhumi Lang");
+
+    if (Uget_tag(a) == 1) {
+        string sa = itostr(Uget_int(a));
+        print("a is Int: ");
+        print(sa);
+        newline();
+        free_str(sa);
+    }
+
+    if (Uget_tag(b) == 2) {
+        string sb = ftostr(Uget_float(b));
+        print("b is Float: ");
+        print(sb);
+        newline();
+        free_str(sb);
+    }
+
+    if (Uget_tag(c) == 3) {
+        string sc = btostr(Uget_bool(c));
+        print("c is Bool: ");
+        print(sc);
+        newline();
+        free_str(sc);
+    }
+
+    if (Uget_tag(d) == 4) {
+        // Uget_string already returns a string
+        print("d is String: ");
+        print(Uget_string(d));
+        newline();
+    }
+
+    Ufree_union(a);
+    Ufree_union(b);
+    Ufree_union(c);
+    Ufree_union(d);
+
+    return 0;
+}
+
+// ----------------- NEW STRESS TESTS (merged) -----------------
+
+// async testing
+async fn test_async_inner() <int> {
+    int f = 25;
+    f += 50;
+    return f;
+}
+pub fn test_async() <int> {
+    return await test_async_inner();
+}
+
+// cast testing
+pub fn test_cast() <int> {
+    print(etypeof(int8(0)));
+    newline();
+    return 0;
+}
+
+// enum1
+enum Color { Red; Green; Blue; }
+pub fn test_enum1() <int> {
+  Color c = Color.Green;
+  match (c) {
+    Red:  { return 0; }
+    Green:{ return 1; }
+    Blue: { return 2; }
+  }
+  return 0;
+}
+
+// enum2
+enum Opt { None; Some: int; }
+pub fn test_enum2() <int> {
+  Opt o = Some(42);
+  match (o) {
+    None:     { return 0; }
+    Some(x):  { return x; }
+  }
+  return 0;
+}
+
+// generic enum
+enum Option<T> {
+  None;
+  Some: T;
+}
+pub fn test_generic_enum() <int> {
+    return 0;
+}
+
+// get address
+pub fn test_get_address() <int> {
+    int x;
+    x = 42;
+    int* p;
+    p = &x;
+    crumble(p)!r=0!w=1;
+    *p = 100;
+    print("0");
+    return 0;
+}
+
+// multigenerics test
+pub fn [F, U] pair(F a, U b) <void> {
+  return;
+}
+pub fn test_multigeneric() <int> {
+  pair(1, 2.0);
+  return 0;
+}
+
+// enums with space definitions.
+enum Opt { None; Some int; }
+
+// ----------------- END NEW STRESS TESTS -----------------
+
+pub fn main() <int> {
+    print("=== TEST: nottest ===\n"); test_nottest(); newline();
+    print("=== TEST: args ===\n"); test_args(); newline();
+    print("=== TEST: arrayExample ===\n"); test_arrayExample(); newline();
+    print("=== TEST: cashregisterexample ===\n"); test_cashregisterexample(); newline();
+    print("=== TEST: continueandbreaktest ===\n"); test_continueandbreaktest(); newline();
+    print("=== TEST: filemain ===\n"); test_filemain(); newline();
+    print("=== TEST: generictypesandstructs ===\n"); test_generictypesandstructs(); newline();
+    print("=== TEST: getosandbits ===\n"); test_getosandbits(); newline();
+    print("=== TEST: inputexample ===\n"); test_inputexample(); newline();
+    print("=== TEST: mathoptest ===\n"); test_mathoptest(); newline();
+    print("=== TEST: memtest ===\n"); test_memtest(); newline();
+    print("=== TEST: C_RuntimeUnionTest ===\n"); test_C_RuntimeUnionTest(); newline();
+
+    // run merged new tests
+    print("=== TEST: async ===\n"); print(itostr(test_async())); newline();
+    print("=== TEST: cast ===\n"); test_cast(); newline();
+    print("=== TEST: enum1 ===\n"); print(itostr(test_enum1())); newline();
+    print("=== TEST: enum2 ===\n"); print(itostr(test_enum2())); newline();
+    print("=== TEST: generic_enum ===\n"); print(itostr(test_generic_enum())); newline();
+    print("=== TEST: get_address ===\n"); test_get_address(); newline();
+    print("=== TEST: multigeneric ===\n"); print(itostr(test_multigeneric())); newline();
+        print("=== TEST: tostringtest ===\n"); print(tostring(0)); newline();
+
+    print("=== ALL TESTS FINISHED ===\n");
+    return 0;
+}
