@@ -137,6 +137,8 @@ class TypeEnv:
 				return scope[name]
 		return None
 def llvm_ty_of(typ: str) -> str:
+	if re.fullmatch(r"i\d+(\*)?", typ):
+		return typ
 	if typ.endswith('*'):
 		base = typ[:-1]
 		if base.startswith('%'):
@@ -797,6 +799,7 @@ class Func:
 	is_vasync: bool = False
 	vasync_except: List[str] = None
 	_vasync_captured: Optional[set] = None
+	is_variadic: bool = False
 	def __post_init__(self):
 		if self.vasync_except is None:
 			self.vasync_except = []
@@ -1068,6 +1071,7 @@ class Parser:
 					break
 			self.expect('RBRACKET')
 		name = self.expect('IDENT').value
+		variadic = False
 		self.expect('LPAREN')
 		params: List[Tuple[str, str]] = []
 		if self.peek().kind != 'RPAREN':
@@ -1090,8 +1094,14 @@ class Parser:
 					params.append((typ, pname))
 				else:
 					bhumi_report_error(self.peek().line, self.peek().col, f"Expected type, got {self.peek().kind}")
-				if not self.match('COMMA'):
-					break
+				if self.match('COMMA'):
+					if self.peek().kind == 'RPAREN':
+						if not is_extern:
+							bhumi_report_error(self.peek().line, self.peek().col, "Variadics are only allowed in external functions (use 'extern fn ...').")
+						variadic = True
+						break
+					continue
+				break
 		self.expect('RPAREN')
 		vasync_except: List[str] = []
 		if is_vasync and self.peek().kind == 'EXCEPT':
@@ -1117,11 +1127,11 @@ class Parser:
 		self.expect('GT')
 		if is_extern:
 			self.expect('SEMI')
-			return Func(access, name, type_params, params, ret_type, None, True, is_async, is_vasync, list(vasync_except))
+			return Func(access, name, type_params, params, ret_type, None, True, is_async, is_vasync, list(vasync_except), is_variadic=variadic)
 		self.expect('LBRACE')
 		body = self.parse_block()
 		self.expect('RBRACE')
-		return Func(access, name, type_params, params, ret_type, body, False, is_async, is_vasync, list(vasync_except))
+		return Func(access, name, type_params, params, ret_type, body, False, is_async, is_vasync, list(vasync_except), is_variadic=variadic)
 	def parse_block(self) -> List[Stmt]:
 		stmts = []
 		while self.peek().kind != 'RBRACE':
@@ -4188,14 +4198,21 @@ def check_types(prog: Program):
 				if fn.type_params and not any(tp in type_subst for tp in fn.type_params):
 					if arg_types:
 						type_subst[fn.type_params[0]] = arg_types[0]
-			if not fn.is_extern:
+			if fn.is_extern and getattr(fn, "is_variadic", False):
+				if len(arg_types) < len(fn.params):
+					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Too few arguments in call to '{expr.name}'; expected at least {len(fn.params)}")
+			else:
 				if len(arg_types) != len(fn.params):
 					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Arity mismatch in call to '{expr.name}'")
-				for actual_type, (expected_type, _) in zip(arg_types, fn.params):
-					expected_concrete = _subst_type(expected_type, type_subst)
-					common = unify_int_types(actual_type, expected_concrete)
-					if expected_concrete != "void" and actual_type != expected_concrete and (not common or common != expected_concrete):
-						bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Argument type mismatch in call to '{expr.name}': expected {expected_concrete}, got {actual_type}")
+			for actual_type, (expected_type, _) in zip(arg_types, fn.params):
+				expected_concrete = _subst_type(expected_type, type_subst)
+				if isinstance(actual_type, str) and re.fullmatch(r'[A-Z]\w*', actual_type):
+					if expected_concrete is not None and not re.fullmatch(r'[A-Z]\w*', expected_concrete):
+						env.declare(actual_type, expected_concrete)
+						actual_type = expected_concrete
+				common = unify_int_types(actual_type, expected_concrete)
+				if expected_concrete != "void" and actual_type != expected_concrete and (not common or common != expected_concrete):
+					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Argument type mismatch in call to '{expr.name}': expected {expected_concrete}, got {actual_type}")
 			ret = fn.ret_type
 			if getattr(fn, "type_params", None) and isinstance(ret, str):
 				ret = _subst_type(ret, type_subst)
