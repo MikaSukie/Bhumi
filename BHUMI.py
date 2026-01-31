@@ -174,7 +174,7 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str]) -> str:
 		if getattr(base_fn, "type_params", None) and new_ret in base_fn.type_params:
 			idx = base_fn.type_params.index(new_ret)
 			new_ret = actual_types[idx]
-		func_table[mononame] = type_map.get(new_ret, f"%struct.{new_ret}")
+		func_table[mononame] = llvm_ty_of(new_ret)
 		if getattr(base_fn, "is_async", False):
 			struct_ty = f"%async.{mononame}"
 			func_table[f"{mononame}_init"] = f"{struct_ty}*"
@@ -3868,8 +3868,10 @@ entry:
 			lines.append(f"  %rettmp = call {user_ret} @user_main()")
 			if bits > 32:
 				lines.append(f"  %ret32 = trunc {user_ret} %rettmp to i32")
-			else:
+			elif bits < 32:
 				lines.append(f"  %ret32 = sext {user_ret} %rettmp to i32")
+			else:
+				lines.append(f"  %ret32 = add i32 %rettmp, 0")
 			lines.append("  ret i32 %ret32")
 		elif user_ret == "double":
 			lines.append("  %retf = call double @user_main()")
