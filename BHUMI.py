@@ -3017,13 +3017,14 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 	elif isinstance(stmt, AutoRegion):
 		symbol_table.push()
 		ctx = {
-			'scope_index': len(symbol_table.scopes) - 1,
+			'scope_snapshot': dict(symbol_table.scopes[-1]),
 			'except': set(stmt.except_vars)
 		}
 		autoregion_stack.append(ctx)
 		for s in stmt.body:
 			gen_stmt(s, out, ret_ty)
-		names_in_scope = list(symbol_table.scopes[ctx['scope_index']].keys())
+		scope_snapshot = ctx.get('scope_snapshot', {})
+		names_in_scope = list(scope_snapshot.keys())
 		for nm in names_in_scope:
 			if nm in ctx['except']:
 				continue
@@ -3031,14 +3032,17 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			owned_here = (nm in owned_vars) or (cr is not None and cr.get('owned'))
 			if not owned_here:
 				continue
-			llvm_ty, llvm_name = symbol_table.lookup(nm)
-			if not (isinstance(llvm_name, str) and (llvm_name.startswith('@') or any(val[1] == llvm_name for val in symbol_table.scopes[ctx['scope_index']].values()))):
+			try:
+				llvm_ty, llvm_name = scope_snapshot[nm]
+			except Exception:
+				continue
+			if not (isinstance(llvm_name, str) and (
+					llvm_name.startswith('@') or llvm_name in (val[1] for val in scope_snapshot.values()))):
 				continue
 			if not llvm_ty.endswith('*'):
 				continue
 			ptr_tmp = new_tmp()
 			out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
-			asize_tmp = new_tmp()
 			cast_tmp = new_tmp()
 			out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
 			asize_tmp = new_tmp()
@@ -3046,12 +3050,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			is_zero_tmp = new_tmp()
 			out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
 			skip_lbl = new_label('free_skip')
-			do_lbl   = new_label('do_free')
+			do_lbl = new_label('do_free')
 			out.append(f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}")
 			out.append(f"{do_lbl}:")
-			cast_tmp = new_tmp()
-			out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-			out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
+			cast_tmp2 = new_tmp()
+			out.append(f"  {cast_tmp2} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+			out.append(f"  call void @bhumi_free(i8* {cast_tmp2})")
 			out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
 			if nm in crumb_runtime:
 				crumb_runtime[nm]['owned'] = False
