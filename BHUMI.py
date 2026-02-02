@@ -2692,13 +2692,18 @@ def infer_type(expr: Expr) -> str:
 	if isinstance(expr, StructInit):
 		return expr.name + "*"
 	if isinstance(expr, ArrayInit):
-		if not expr.elements:
-			bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "Cannot infer type for empty array literal")
-		elem_type = infer_type(expr.elements[0])
-		for el in expr.elements[1:]:
-			t = infer_type(el)
-			if unify_types(elem_type, t) is None:
-				bhumi_report_error(getattr(el, "lineno", None), getattr(el, "col", None), f"Array literal element types do not match: {elem_type} vs {t}")
+		elem_type = None
+		for e in expr.elements:
+			t = infer_type(e)
+			if elem_type is None:
+				elem_type = t
+				continue
+			common_int = unify_int_types(elem_type, t)
+			if common_int is not None:
+				elem_type = common_int
+				continue
+			if t != elem_type:
+				bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Array literal element types do not match: {elem_type} vs {t}")
 		return f"{elem_type}[{len(expr.elements)}]"
 	if isinstance(expr, Call) and expr.name == "!" and len(expr.args) == 1:
 		arg_t = infer_type(expr.args[0])
@@ -4091,8 +4096,10 @@ def check_types(prog: Program):
 					v_typ = env.lookup(vname)
 					if v_typ is None:
 						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"free() of undeclared variable '{vname}'")
-					if not v_typ.endswith('*') and v_typ != 'void*':
-						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"free() argument must be a pointer, got '{v_typ}'")
+					global_decl = next((g for g in prog.globals if g.name == vname), None)
+					is_extern_global = bool(global_decl and getattr(global_decl, "is_extern", False))
+					if not (v_typ.endswith('*') or v_typ == 'void*' or v_typ == 'string' or is_extern_global):
+						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"free() argument must be a pointer or string (or extern global). got '{v_typ}' — " "this looks like a stack/local variable")
 					if v_typ == "undefined":
 						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"[BHC-ERR]: double free detected on variable '{vname}'")
 					env.declare(vname, "undefined")
@@ -4125,10 +4132,10 @@ def check_types(prog: Program):
 				return "int*"
 			if expr.name == "free":
 				if len(arg_types) != 1:
-					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "free() takes exactly one pointer argument")
+					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "free() takes exactly one pointer (or string) argument")
 				arg_ty = arg_types[0]
-				if not arg_ty.endswith("*"):
-					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "free() expects a pointer argument")
+				if not (arg_ty.endswith("*") or arg_ty == "void*" or arg_ty == "string"):
+					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "free() expects a pointer or string argument")
 				return "void"
 			if expr.name == "puts":
 				if len(arg_types) != 1:
