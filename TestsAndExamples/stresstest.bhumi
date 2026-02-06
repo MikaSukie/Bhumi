@@ -365,7 +365,7 @@ pub fn test_get_address() <int> {
     x = 42;
     int* p;
     p = &x;
-    crumble(p)!r=0!w=1;
+    crumble(p)!r=0!w=1; // required for each alias. to state read counts or not. but writes matter. tells the compiler whether to transfer oder nicht.
     *p = 100;
     print("0");
     return 0;
