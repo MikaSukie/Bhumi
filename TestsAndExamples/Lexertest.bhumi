@@ -31,9 +31,10 @@ fn main() <void> {
         int index = -1;
         printnl(tostring(charat(index, sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
         printnl(tostring(charat(slength(sourcefile) , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
-		printnl(tostring(charat(slength(sourcefile) + 1 , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
+        printnl(tostring(charat(slength(sourcefile) + 1 , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
         newline();
         // printnl(sourcefile);
+        free_str(sourcefile);
     }
 
     printnl("GET MAX LENGTH TEST");
@@ -45,6 +46,7 @@ fn main() <void> {
         }
         printnl("index: " + tostring(index));
         newline();
+        free_str(sourcefile);
     }
 
     printnl("DETECT KEYWORDS");
@@ -72,6 +74,7 @@ fn main() <void> {
                 }
             }
         }
+        free_str(sourcefile);
     }
 
     printnl("NEWLINE DETECTION");
@@ -88,7 +91,7 @@ fn main() <void> {
 
         printnl(tostring(nlc) + " newlines");
     }
-
+    free_str(sourcefile);
 }
 
 // ─── String Builder example ────────────────────────────────────────────────
