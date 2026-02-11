@@ -1,0 +1,34 @@
+import C_std;
+
+fn main() <void> {
+    int num = iinput("number: ");
+    int temp = 1;
+
+    while (num > 1) {
+        temp *= num;
+        num -= 1;
+    }
+
+    string f = sb_create();
+    string factStr = tostring(temp);
+
+    int i = slength(factStr) - 1;
+    int count = 0;
+    while (i >= 0) {
+        if (count > 0 && count % 3 == 0) {
+            f = f + ",";
+        }
+        f = f + charat(i, factStr);
+        i -= 1;
+        count += 1;
+    }
+
+    string reversed = sb_create();
+    int j = slength(f) - 1;
+    while (j >= 0) {
+        reversed = reversed + charat(j, f);
+        j -= 1;
+    }
+
+    printnl(reversed);
+}
