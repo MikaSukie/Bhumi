@@ -50,11 +50,10 @@ pub extern fn i32castf(int32 i) <float>;
 pub extern fn i64castf(int64 i) <float>;
 pub extern fn icastf(int i) <float>;
 
-pub extern fn input(string input) <string>;
+pub extern fn sinput(string input) <string>;
 pub extern fn iinput(string input) <int>;
 pub extern fn binput(string input) <bool>;
 pub extern fn finput(string input) <float>;
-pub extern fn sinput(string input) <string>;
 
 pub extern fn print(string s) <void>;
 
@@ -72,10 +71,12 @@ pub extern fn isalpha_at(int i, string s) <bool>;
 pub extern fn isnum_at(int i, string s) <bool>;
 
 pub fn try_read_file(string path) <string> {
-    if (file_exists(path)) {
-        return read_file(path);
-    } else {
-        return "";
+    autoregion {
+        if (file_exists(path)) {
+            return read_file(path);
+        } else {
+            return "";
+        }
     }
 }
 
@@ -110,7 +111,7 @@ pub fn [T] tostring(T candidate) <string> {
         typecase(bool)  { return btostr(candidate); }
         typecase(string){ return tostr(candidate);  }
     }
-    return "tostring has errored as no matching typecases were found.";
+    return "tostring has errored as no matching typecases were found.\n";
 }
 
 pub fn [F] etostring(F candidate) <string> {
@@ -124,3 +125,16 @@ pub fn [F] etostring(F candidate) <string> {
 }
 
 /* end of STDLIB */
+
+pub extern fn Umake_int(int x)        <int>;
+pub extern fn Umake_float(float f)    <int>;
+pub extern fn Umake_bool(bool b)      <int>;
+pub extern fn Umake_string(string s)  <int>;
+
+pub extern fn Uget_tag(int h)         <int>;
+pub extern fn Uget_int(int h)         <int>;
+pub extern fn Uget_float(int h)     <float>;
+pub extern fn Uget_bool(int h)       <bool>;
+pub extern fn Uget_string(int h)   <string>;
+
+pub extern fn Ufree_union(int h)     <void>;
