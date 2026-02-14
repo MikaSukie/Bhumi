@@ -3428,6 +3428,7 @@ def compile_program(prog: Program) -> str:
 			llvm_ret_ty = llvm_ty_of(fn.ret_type)
 			func_table.pop("main", None)
 			func_table["user_main"] = llvm_ret_ty
+			func_table["main"] = func_table["user_main"]
 			break
 	lines: List[str] = [
 		"; ModuleID = 'bhumi'",
