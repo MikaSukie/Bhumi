@@ -172,7 +172,7 @@ char* sb_finish(char* builder) {
     return builder;
 }
 
-char* input(const char* prompt) {
+char* sinput(const char* prompt) {
     if (prompt) {
         fputs(prompt, stdout);
         fflush(stdout);
@@ -206,7 +206,7 @@ char* input(const char* prompt) {
 }
 
 int64_t iinput(const char* prompt) {
-    char* s = input(prompt);
+    char* s = sinput(prompt);
     if (!s) return 0;
     int64_t val = strtoll(s, NULL, 10);
     free(s);
@@ -214,7 +214,7 @@ int64_t iinput(const char* prompt) {
 }
 
 double finput(const char* prompt) {
-    char* s = input(prompt);
+    char* s = sinput(prompt);
     if (!s) return 0.0;
     double val = strtod(s, NULL);
     free(s);
@@ -222,15 +222,11 @@ double finput(const char* prompt) {
 }
 
 bool binput(const char* prompt) {
-    char* s = input(prompt);
+    char* s = sinput(prompt);
     if (!s) return false;
     bool result = (strcmp(s, "true") == 0 || strcmp(s, "1") == 0);
     free(s);
     return result;
-}
-
-char* sinput(const char* prompt) {
-    return input(prompt);
 }
 
 int ilength(int64_t x) {
@@ -377,14 +373,14 @@ int countcontain(const char* str, const char* substr) {
 }
 
 char* charat(int64_t idx, const char* s) {
-    if (!s) return safe_strdup("NULL");
+    if (!s) return "NULL";
     size_t len = strlen(s);
-    if (idx == -1)                    return safe_strdup("SOF");
-    if (idx == (int64_t)len)          return safe_strdup("EOF");
-    if (idx < 0 || (size_t)idx >= len) return safe_strdup("OOB");
+    if (idx == -1)                    return "SOF";
+    if (idx == (int64_t)len)          return "EOF";
+    if (idx < 0 || (size_t)idx >= len) return "OOB";
     char c = s[(size_t)idx];
     if (c == '\n' || c == '\r')
-        return safe_strdup("NL");
+        return "NL";
     char tmp[2] = { c, '\0' };
     return safe_strdup(tmp);
 }
@@ -570,3 +566,4 @@ const char* get_os_max_bits() {
            sizeof(void*) == 4 ? "32" : "unknown";
 #endif
 }
+
