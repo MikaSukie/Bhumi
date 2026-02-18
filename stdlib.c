@@ -66,10 +66,6 @@ void print(const char* s) {
     if (s) fputs(s, stdout);
 }
 
-void println(const char* s) {
-    if (s) puts(s);
-}
-
 void eprint(const char* s) {
     if (s) fputs(s, stderr);
 }
@@ -307,6 +303,12 @@ bool append_file(const char* path, const char* content) {
     bool success = fwrite(content, 1, len, f) == len;
     fclose(f);
     return success;
+}
+
+bool delete_file(const char* path) {
+    if (!path) return false;
+    int res = remove(path);
+    return res == 0;
 }
 
 bool file_exists(const char* path) {
