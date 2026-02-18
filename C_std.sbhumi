@@ -54,8 +54,12 @@ pub extern fn sinput(string input) <string>;
 pub extern fn iinput(string input) <int>;
 pub extern fn binput(string input) <bool>;
 pub extern fn finput(string input) <float>;
+pub fn input(string s) <string> {
+    return sinput(s);
+}
 
-pub extern fn print(string s) <void>;
+pub extern fn print(string s)  <void>;
+pub extern fn eprint(string s) <void>;
 
 pub extern fn read_file(string path) <string>;
 pub extern fn write_file(string path, string content) <bool>;
@@ -63,7 +67,7 @@ pub extern fn append_file(string path, string content) <bool>;
 pub extern fn file_exists(string path) <bool>;
 pub extern fn read_lines(string path) <string>;
 pub extern fn free_str(string s) <void>;
-
+pub extern fn delete_file(string s) <void>;
 pub extern fn charat(int i, string s) <string>;
 pub extern fn isalnum_at(int i, string s) <bool>;
 pub extern fn isspace_at(int i, string s) <bool>;
