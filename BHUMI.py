@@ -65,8 +65,9 @@ def llvm_to_lang(llvm_t: str) -> str:
 TYPE_TOKENS = {
 	'IDENT', 'INT', 'INT8', 'INT16', 'INT32', 'INT64',
 	'FLOAT', 'STRING', 'BOOL', 'CHAR', 'VOID', 'UINT',
-	'UINT8', 'UINT16', 'UINT32', 'UINT64', 'FLOAT32'
-	}
+	'UINT8', 'UINT16', 'UINT32', 'UINT64', 'FLOAT32',
+	'HASH'
+}
 CAST_TYPE_TOKENS = {
 	'INT', 'INT8', 'INT16', 'INT32', 'INT64',
 	'FLOAT', 'STRING', 'BOOL', 'CHAR', 'VOID',
@@ -96,7 +97,7 @@ SINGLE_CHARS = {
 	'=': 'EQUAL',	'+': 'PLUS',	 '-': 'MINUS',	'*': 'STAR',
 	'/': 'SLASH',	'<': 'LT',	   '>': 'GT',	   '[': 'LBRACKET',
 	']': 'RBRACKET', '?': 'QUESTION', '.': 'DOT', ':': 'COLON', '%': 'PERCENT',
-	'!': 'BANG', '&': 'AMP', '|': 'PIPE', '^': 'CARET'
+	'!': 'BANG', '&': 'AMP', '|': 'PIPE', '^': 'CARET', '#': 'HASH'
 	}
 MULTI_CHARS = {
 	'==': 'EQEQ', '!=': 'NEQ', '<=': 'LE', '>=': 'GE', '->': 'ARROW', '&&': 'AND',  '||': 'OR',
@@ -137,6 +138,8 @@ class TypeEnv:
 				return scope[name]
 		return None
 def llvm_ty_of(typ: str) -> str:
+	if typ == '#':
+		bhumi_report_error(None, None, "Internal compiler error: encountered placeholder '#' in llvm_ty_of, missing monomorphisation")
 	if re.fullmatch(r"i\d+(\*)?", typ):
 		return typ
 	if typ.endswith('*'):
@@ -163,8 +166,10 @@ def zero_const_for_llvm(llvm_t: str) -> str:
 	if '*' in llvm_t or llvm_t.strip().startswith('%'):
 		return 'null'
 	return '0'
-def ensure_monomorph_for_call(base_name: str, actual_types: List[str]) -> str:
+def ensure_monomorph_for_call(base_name: str, actual_types: List[str], expected_ret: Optional[str] = None) -> str:
 	mangled_parts = [mangle_type(a) for a in actual_types]
+	if expected_ret is not None:
+		mangled_parts.append(mangle_type(expected_ret))
 	mononame = f"{base_name}_" + "_".join(mangled_parts)
 	if mononame not in func_table:
 		base_fn = next((f for f in all_funcs if f.name == base_name and f.type_params), None)
@@ -174,6 +179,8 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str]) -> str:
 		if getattr(base_fn, "type_params", None) and new_ret in base_fn.type_params:
 			idx = base_fn.type_params.index(new_ret)
 			new_ret = actual_types[idx]
+		if new_ret == '#' and expected_ret is not None:
+			new_ret = expected_ret
 		func_table[mononame] = llvm_ty_of(new_ret)
 		if getattr(base_fn, "is_async", False):
 			struct_ty = f"%async.{mononame}"
@@ -182,43 +189,63 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str]) -> str:
 			func_table.setdefault(f"{base_name}_init", func_table[f"{mononame}_init"])
 			func_table.setdefault(f"{base_name}_resume", func_table[f"{mononame}_resume"])
 	return mononame
-def ensure_monomorph_call(call_expr: 'Call', out: List[str]) -> str:
+def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optional[str] = None) -> str:
 	base_fn = next((f for f in all_funcs if f.name == call_expr.name), None)
-	if not base_fn or not getattr(base_fn, "type_params", None):
+	if not base_fn:
 		return call_expr.name
-	if not call_expr.args:
+	has_type_params = bool(getattr(base_fn, "type_params", None))
+	if not has_type_params and base_fn.ret_type != '#':
+		return call_expr.name
+	if has_type_params and not call_expr.args:
 		bhumi_report_error(None, None, f"Generic function '{call_expr.name}' called with no arguments to infer type parameters")
-	arg_types = [infer_type(a) for a in call_expr.args]
-	actuals = []
-	for tp in base_fn.type_params:
-		found = None
-		for param_idx, (param_typ, _) in enumerate(base_fn.params):
-			if param_typ == tp or tp in param_typ:
-				if param_idx < len(arg_types):
-					found = arg_types[param_idx]
-					break
-		if found is None and base_fn.ret_type == tp and len(arg_types) > 0:
-			found = arg_types[0]
-		if found is None:
-			bhumi_report_error(None, None, f"Cannot infer type parameter '{tp}' for generic function '{call_expr.name}'")
-		actuals.append(found)
+	arg_types = [infer_type(a) for a in (call_expr.args or [])]
+	actuals: List[str] = []
+	if has_type_params:
+		for tp in base_fn.type_params:
+			found = None
+			for param_idx, (param_typ, _) in enumerate(base_fn.params):
+				if param_typ == tp or tp in param_typ:
+					if param_idx < len(arg_types):
+						found = arg_types[param_idx]
+						break
+			if found is None and base_fn.ret_type == tp and len(arg_types) > 0:
+				found = arg_types[0]
+			if found is None:
+				bhumi_report_error(None, None, f"Cannot infer type parameter '{tp}' for generic function '{call_expr.name}'")
+			actuals.append(found)
 	mangled_parts = [mangle_type(a) for a in actuals]
-	mononame = f"{call_expr.name}_" + "_".join(mangled_parts)
+	if base_fn.ret_type == '#' and expected_ret is not None:
+		mangled_parts.append(mangle_type(expected_ret))
+	if not mangled_parts and base_fn.ret_type != '#':
+		return call_expr.name
+	mononame = call_expr.name if not mangled_parts else f"{call_expr.name}_" + "_".join(mangled_parts)
 	if mononame in func_table:
 		return mononame
 	subst_map: Dict[str, str] = {}
-	for (param_type, _), actual in zip(base_fn.params, arg_types):
-		for tp in base_fn.type_params:
-			if param_type == tp:
-				subst_map[tp] = actual
-			elif param_type.startswith(tp) and param_type[len(tp):] in ('*', '[]'):
-				subst_map[tp] = actual
+	if has_type_params:
+		for (param_type, _), actual in zip(base_fn.params, arg_types):
+			for tp in base_fn.type_params:
+				if param_type == tp:
+					subst_map[tp] = actual
+				elif param_type.startswith(tp) and param_type[len(tp):] in ('*', '[]'):
+					subst_map[tp] = actual
+	if base_fn.ret_type == '#' and expected_ret is not None:
+		subst_map['#'] = expected_ret
+	def _subst_type(t: Optional[str], subst: Dict[str, str]) -> Optional[str]:
+		if t is None:
+			return None
+		for k, v in subst.items():
+			if t == k:
+				return v
+			if t.startswith(k) and t[len(k):] in ('*', '[]'):
+				return v + t[len(k):]
+		return t
 	def replace_in_expr(e: Expr):
 		if e is None:
 			return None
 		if isinstance(e, Var):
 			return Var(e.name)
-		if isinstance(e, IntLit) or isinstance(e, FloatLit) or isinstance(e, BoolLit) or isinstance(e, StrLit) or isinstance(e, CharLit) or isinstance(e, NullLit):
+		if isinstance(e, (IntLit, FloatLit, BoolLit, StrLit, CharLit, NullLit)):
 			return e
 		if isinstance(e, Call):
 			return Call(e.name, [replace_in_expr(a) for a in e.args])
@@ -234,30 +261,40 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str]) -> str:
 			return StructInit(e.name, [(fname, replace_in_expr(fexpr)) for fname, fexpr in e.fields])
 		if isinstance(e, AwaitExpr):
 			return AwaitExpr(replace_in_expr(e.expr))
+		if isinstance(e, VAwaitExpr):
+			return VAwaitExpr(replace_in_expr(e.expr))
 		if isinstance(e, UnaryDeref):
 			return UnaryDeref(replace_in_expr(e.ptr))
 		if isinstance(e, AddressOf):
 			return AddressOf(replace_in_expr(e.expr))
 		if isinstance(e, Cast):
-			new_typ = _subst_type(e.typ, subst_map)
-			return Cast(new_typ, replace_in_expr(e.expr))
+			return Cast(_subst_type(e.typ, subst_map), replace_in_expr(e.expr))
 		if isinstance(e, Ternary):
 			return Ternary(replace_in_expr(e.cond), replace_in_expr(e.then_expr), replace_in_expr(e.else_expr))
 		if isinstance(e, TypeofExpr):
+			if isinstance(e.expr, CallerType):
+				concrete = subst_map.get('#')
+				if concrete is not None:
+					return StrLit(concrete)
+				return TypeofExpr(e.kind, CallerType())
 			return TypeofExpr(e.kind, replace_in_expr(e.expr))
 		return e
 	def replace_in_stmt(s: Stmt):
 		if s is None:
 			return None
 		if isinstance(s, VarDecl):
-			new_typ = _subst_type(s.typ, subst_map)
-			new_expr = replace_in_expr(s.expr) if s.expr else None
-			return VarDecl(s.access, new_typ, s.name, new_expr, s.nomd)
+			return VarDecl(s.access, _subst_type(s.typ, subst_map), s.name,
+				replace_in_expr(s.expr) if s.expr else None, s.nomd)
 		if isinstance(s, Assign):
-			lhs = s.name
-			return Assign(lhs, replace_in_expr(s.expr))
+			name = s.name
+			if isinstance(name, UnaryDeref):
+				return Assign(UnaryDeref(replace_in_expr(name.ptr)), replace_in_expr(s.expr))
+			else:
+				return Assign(name, replace_in_expr(s.expr))
 		if isinstance(s, IndexAssign):
 			return IndexAssign(s.array, replace_in_expr(s.index), replace_in_expr(s.value))
+		if isinstance(s, ExprStmt):
+			return ExprStmt(replace_in_expr(s.expr))
 		if isinstance(s, IfStmt):
 			cond0 = replace_in_expr(s.cond)
 			then_body0 = [replace_in_stmt(ss) for ss in s.then_body]
@@ -270,6 +307,15 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str]) -> str:
 			return IfStmt(cond0, then_body0, else_body0)
 		if isinstance(s, WhileStmt):
 			return WhileStmt(replace_in_expr(s.cond), [replace_in_stmt(ss) for ss in s.body])
+		if isinstance(s, ReturnStmt):
+			return ReturnStmt(replace_in_expr(s.expr) if s.expr else None)
+		if isinstance(s, Match):
+			new_expr0 = replace_in_expr(s.expr)
+			new_cases = []
+			for case in s.cases:
+				new_body0 = [replace_in_stmt(ss) for ss in case.body]
+				new_cases.append(MatchCase(case.variant, case.binding, new_body0))
+			return Match(new_expr0, new_cases)
 		if isinstance(s, TypeSwitch):
 			subj = s.subject
 			actual = subst_map.get(subj)
@@ -303,31 +349,19 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str]) -> str:
 			if s.fallback is not None:
 				return transform_body(s.fallback)
 			return []
-		if isinstance(s, ReturnStmt):
-			return ReturnStmt(replace_in_expr(s.expr) if s.expr else None)
-		if isinstance(s, ExprStmt):
-			return ExprStmt(replace_in_expr(s.expr))
-		if isinstance(s, Match):
-			new_expr0 = replace_in_expr(s.expr)
-			new_cases = []
-			for case in s.cases:
-				new_body0 = [replace_in_stmt(ss) for ss in case.body]
-				new_cases.append(MatchCase(case.variant, case.binding, new_body0))
-			return Match(new_expr0, new_cases)
 		return s
 	new_params = [(_subst_type(p[0], subst_map), p[1]) for p in base_fn.params]
 	new_ret = _subst_type(base_fn.ret_type, subst_map)
 	new_body = []
 	if base_fn.body:
 		for stmt in base_fn.body:
-			repl = replace_in_stmt(stmt)
-			if repl is None:
+			r = replace_in_stmt(stmt)
+			if r is None:
 				continue
-			if isinstance(repl, list):
-				for s in repl:
-					new_body.append(s)
+			if isinstance(r, list):
+				new_body.extend(r)
 			else:
-				new_body.append(repl)
+				new_body.append(r)
 	new_fn = Func(base_fn.access, mononame, [], new_params, new_ret, new_body, base_fn.is_extern, base_fn.is_async)
 	all_funcs.append(new_fn)
 	func_table[mononame] = llvm_ty_of(new_ret)
@@ -345,8 +379,8 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str]) -> str:
 		except ValueError:
 			pass
 		raise
-	out.insert(0, "\n".join(llvm_lines))
-	return mononame if mononame in func_table else call_expr.name
+	out.insert(0, "\n".join(llvm_lines) + "\n")
+	return mononame
 def _subst_type(typ: Optional[str], subst: Dict[str, str]) -> Optional[str]:
 	if typ is None:
 		return None
@@ -642,6 +676,8 @@ class StrLit(Expr): value: str
 class Var(Expr): name: str
 @dataclass
 class NullLit(Expr): pass
+@dataclass
+class CallerType(Expr): pass
 @dataclass
 class GlobalVar:
 	typ: str
@@ -1182,8 +1218,8 @@ class Parser:
 	def parse_typeswitch(self) -> TypeSwitch:
 		self.expect('TYPESWITCH')
 		self.expect('LPAREN')
-		if self.peek().kind != 'IDENT':
-			bhumi_report_error(self.peek().line, self.peek().col, "Expected type parameter identifier in typeswitch(...)")
+		if self.peek().kind not in ('IDENT', 'HASH'):
+			bhumi_report_error(self.peek().line, self.peek().col, "Expected type parameter identifier or '#' in typeswitch(.)")
 		subject = self.bump().value
 		self.expect('RPAREN')
 		self.expect('LBRACE')
@@ -1554,6 +1590,8 @@ class Parser:
 					self.expect('RBRACKET')
 					return Index(base, index_expr)
 				return base
+			if t.kind == 'HASH':
+				return CallerType()
 			bhumi_report_error(t.line, t.col, f"Unexpected token: {t.kind}")
 		expr: Expr = parse_atom()
 		while self.peek().kind == 'DOT':
@@ -1617,7 +1655,9 @@ type_map = {
 struct_llvm_defs: List[str] = []
 symbol_table = SymbolTable()
 func_table: Dict[str, str] = {}
-def gen_expr(expr: Expr, out: List[str]) -> str | None:
+def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str | None:
+	if isinstance(expr, CallerType):
+		bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "Internal compiler error: unresolved caller-placeholder '#' reached codegen (missing monomorphisation)")
 	def format_float(val: float) -> str:
 		return f"{val:.8e}"
 	def _maybe_flush_deferred(e: Expr, ssa_name: str) -> None:
@@ -2455,7 +2495,7 @@ def gen_expr(expr: Expr, out: List[str]) -> str | None:
 			tmp = new_tmp()
 			out.append(f"  {tmp} = xor i1 {arg}, true")
 			return tmp
-		call_target = ensure_monomorph_call(expr, out)
+		call_target = ensure_monomorph_call(expr, out, expected_ret=expected)
 		concrete_fn = next((f for f in all_funcs if f.name == call_target), None)
 		if concrete_fn and concrete_fn.is_async:
 			bhumi_report_error(None, None, f"async function '{expr.name}' must be awaited")
@@ -2613,6 +2653,8 @@ def gen_expr(expr: Expr, out: List[str]) -> str | None:
 		return tmp_ptr
 	bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Unhandled expr: {expr}")
 def infer_type(expr: Expr) -> str:
+	if isinstance(expr, CallerType):
+		return '#'
 	if isinstance(expr, UnaryDeref):
 		if isinstance(expr.ptr, NullLit):
 			bhumi_report_error(getattr(expr.ptr, "lineno", None), getattr(expr.ptr, "col", None), "[BHC-ERR]: dereference of literal null pointer")
@@ -2818,11 +2860,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 				symbol_table.declare(stmt.name, llvm_ty, ir_name)
 			if promoted is not None and stmt.name in promoted:
 				if stmt.expr:
-					val = gen_expr(stmt.expr, out)
+					val = gen_expr(stmt.expr, out, expected=stmt.typ)
 					out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
 				return
 			if stmt.expr:
-				val = gen_expr(stmt.expr, out)
+				val = gen_expr(stmt.expr, out, expected=stmt.typ)
 				src_cast = new_tmp()
 				dst_cast = new_tmp()
 				out.append(f"  {src_cast} = bitcast {llvm_ty}* {val} to i8*")
@@ -2846,7 +2888,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			symbol_table.declare(stmt.name, llvm_ty, ir_name)
 		if promoted is not None and stmt.name in promoted:
 			if stmt.expr:
-				val = gen_expr(stmt.expr, out)
+				val = gen_expr(stmt.expr, out, expected=stmt.typ)
 				src_llvm = llvm_ty_of(infer_type(stmt.expr))
 				if src_llvm != llvm_ty:
 					cast_tmp = new_tmp()
@@ -2867,7 +2909,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 							crumb_runtime[stmt.name]['owned'] = True
 			return
 		if stmt.expr:
-			val = gen_expr(stmt.expr, out)
+			val = gen_expr(stmt.expr, out, expected=stmt.typ)
 			src_llvm = llvm_ty_of(infer_type(stmt.expr))
 			if llvm_ty.endswith('*') and src_llvm.endswith('*'):
 				if src_llvm != llvm_ty:
@@ -2916,17 +2958,29 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 	elif isinstance(stmt, Assign):
 		if isinstance(stmt.name, UnaryDeref):
 			ptr_val = gen_expr(stmt.name.ptr, out)
-			val = gen_expr(stmt.expr, out)
+			ptr_type = infer_type(stmt.name.ptr)
+			val_expected = None
+			if isinstance(ptr_type, str) and ptr_type.endswith('*'):
+				val_expected = ptr_type[:-1]
+			val = gen_expr(stmt.expr, out, expected=val_expected)
 			val_ty = infer_type(stmt.expr)
 			llvm_ty = type_map.get(val_ty, f"%struct.{val_ty}")
 			out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {ptr_val}")
 		else:
-			val = gen_expr(stmt.expr, out)
 			llvm_ty, ir_name = symbol_table.lookup(stmt.name)
 			if ir_name.startswith('@'):
 				addr_token = ir_name
 			else:
 				addr_token = f"%{ir_name}_addr"
+			expected_lang = None
+			if llvm_ty is not None:
+				for high, low in type_map.items():
+					if low == llvm_ty:
+						expected_lang = high
+						break
+				if expected_lang is None and isinstance(llvm_ty, str) and llvm_ty.startswith("%struct."):
+					expected_lang = llvm_ty[len("%struct."):]
+			val = gen_expr(stmt.expr, out, expected=expected_lang)
 			vn = stmt.name
 			cr = crumb_runtime.get(vn)
 			handled_write_exhaustion_new_alloc = False
@@ -2940,7 +2994,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 					out.append(f"  call void @free(i8* {cast_tmp})")
 					cr['owned'] = False
 					owned_vars.discard(vn)
-				elif (cr.get('wmax') is not None and cr['wc'] == cr['wmax'] and not cr.get('owned') and isinstance(stmt.expr, Call)):
+				elif (cr.get('wmax') is not None and cr['wc'] == cr['wmax'] and not cr.get('owned') and isinstance(
+						stmt.expr, Call)):
 					cast_tmp2 = new_tmp()
 					out.append(f"  {cast_tmp2} = bitcast {llvm_ty} {val} to i8*")
 					out.append(f"  call void @free(i8* {cast_tmp2})")
@@ -3010,7 +3065,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 		ok = new_tmp()
 		out.append(f"  {ok} = icmp ult i32 {idx_cast}, {len_val}")
 		fail_lbl = new_label("oob_fail")
-		ok_lbl   = new_label("oob_ok")
+		ok_lbl = new_label("oob_ok")
 		out.append(f"  br i1 {ok}, label %{ok_lbl}, label %{fail_lbl}")
 		out.append(f"{fail_lbl}:")
 		out.append(f"  call void @bhumi_oob_abort()")
@@ -3072,7 +3127,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 		symbol_table.pop()
 		return
 	elif isinstance(stmt, IfStmt):
-		cond = gen_expr(stmt.cond, out)
+		cond = gen_expr(stmt.cond, out, expected='bool')
 		then_lbl = new_label('then')
 		else_lbl = new_label('else') if stmt.else_body else None
 		end_lbl = new_label('endif')
@@ -3105,7 +3160,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 		loop_stack.append({'continue': head_lbl, 'break': end_lbl})
 		out.append(f"  br label %{head_lbl}")
 		out.append(f"{head_lbl}:")
-		cond = gen_expr(stmt.cond, out)
+		cond = gen_expr(stmt.cond, out, expected='bool')
 		out.append(f"  br i1 {cond}, label %{body_lbl}, label %{end_lbl}")
 		out.append(f"{body_lbl}:")
 		symbol_table.push()
@@ -3120,7 +3175,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 	elif isinstance(stmt, TypeSwitch):
 		bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), "Internal compiler error: typeswitch remained in codegen (should be resolved at monomorphization)")
 	elif isinstance(stmt, ReturnStmt):
-		val = gen_expr(stmt.expr, out) if stmt.expr else None
+		val = None
+		if stmt.expr:
+			dst_lang = llvm_to_lang(ret_ty)
+			val = gen_expr(stmt.expr, out, expected=dst_lang)
 		if autoregion_stack:
 			for ctx in reversed(autoregion_stack):
 				scope_idx = ctx.get('scope_index')
@@ -3234,7 +3292,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 		llvm_enum_ty = type_map.get(enum_name, None)
 		has_payloads = any(p is not None for (_, p) in enum_variant_map[enum_name])
 		if llvm_enum_ty and llvm_enum_ty.startswith("i") and not has_payloads:
-			val = gen_expr(stmt.expr, out)
+			val = gen_expr(stmt.expr, out, expected=enum_name)
 			end_lbl = new_label("match_end")
 			variant_labels = {vname: new_label(f"case_{vname}") for vname, _ in enum_variant_map[enum_name]}
 			out.append(f"  switch {llvm_enum_ty} {val}, label %{end_lbl} [")
@@ -3253,7 +3311,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 					out.append(f"  br label %{end_lbl}")
 			out.append(f"{end_lbl}:")
 			return
-		enum_ptr = gen_expr(stmt.expr, out)
+		enum_ptr = gen_expr(stmt.expr, out, expected=enum_name)
 		tag_ptr = new_tmp()
 		out.append(f"  {tag_ptr} = getelementptr inbounds %enum.{enum_name}, %enum.{enum_name}* {enum_ptr}, i32 0, i32 0")
 		loaded_tag = new_tmp()
@@ -3293,6 +3351,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 def gen_func(fn: Func) -> List[str]:
 	if fn.type_params:
 		return []
+	if fn.ret_type == '#':
+		return []
+	if fn.is_extern and fn.ret_type == '#':
+		bhumi_report_error(getattr(fn, "lineno", None), getattr(fn, "col", None), "extern functions cannot use '#' as a return type")
 	if fn.is_extern:
 		param_sig = ", ".join(f"{llvm_ty_of(t)} %{n}" for t, n in fn.params)
 		ret_ty = llvm_ty_of(fn.ret_type)
@@ -3410,6 +3472,8 @@ def compile_program(prog: Program) -> str:
 	func_table.clear()
 	for fn in prog.funcs:
 		if fn.type_params:
+			continue
+		if fn.ret_type == '#':
 			continue
 		llvm_ret_ty = llvm_ty_of(fn.ret_type)
 		func_table[fn.name] = llvm_ret_ty
@@ -3987,7 +4051,11 @@ def check_types(prog: Program):
 			except Exception:
 				return None
 		return None
-	def check_expr(expr: Expr) -> str:
+	def check_expr(expr: Expr, expected: Optional[str] = None) -> str:
+		if isinstance(expr, CallerType):
+			if expected is not None:
+				return expected
+			return '#'
 		if isinstance(expr, AwaitExpr):
 			return check_expr(expr.expr)
 		if isinstance(expr, UnaryOp):
@@ -4045,7 +4113,7 @@ def check_types(prog: Program):
 				bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Use of undeclared variable '{expr.name}'")
 			if typ == "undefined":
 				bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Use of variable '{expr.name}' after deref (use-after-free)")
-			_inc_read(expr.name, node_desc=f"Var@{getattr(expr,'lineno','?')}")
+			_inc_read(expr.name, node_desc=f"Var@{getattr(expr, 'lineno', '?')}")
 			return typ
 		if isinstance(expr, TypeofExpr):
 			inner_type = check_expr(expr.expr)
@@ -4100,7 +4168,7 @@ def check_types(prog: Program):
 					global_decl = next((g for g in prog.globals if g.name == vname), None)
 					is_extern_global = bool(global_decl and getattr(global_decl, "is_extern", False))
 					if not (v_typ.endswith('*') or v_typ == 'void*' or v_typ == 'string' or is_extern_global):
-						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"free() argument must be a pointer or string (or extern global). got '{v_typ}' — " "this looks like a stack/local variable")
+						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"free() argument must be a pointer or string (or extern global). got '{v_typ}' — this looks like a stack/local variable")
 					if v_typ == "undefined":
 						bhumi_report_error(getattr(a0, "lineno", None), getattr(a0, "col", None), f"[BHC-ERR]: double free detected on variable '{vname}'")
 					env.declare(vname, "undefined")
@@ -4225,17 +4293,23 @@ def check_types(prog: Program):
 						env.declare(actual_type, expected_concrete)
 						actual_type = expected_concrete
 				common = unify_int_types(actual_type, expected_concrete)
-				if expected_concrete != "void" and actual_type != expected_concrete and (not common or common != expected_concrete):
+				if expected_concrete != "void" and actual_type != expected_concrete and (
+						not common or common != expected_concrete):
 					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Argument type mismatch in call to '{expr.name}': expected {expected_concrete}, got {actual_type}")
 			ret = fn.ret_type
 			if getattr(fn, "type_params", None) and isinstance(ret, str):
 				ret = _subst_type(ret, type_subst)
+			if ret == '#':
+				if expected is not None:
+					return expected
+				else:
+					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Call to '{expr.name}' returns '#', but call context does not provide required expected type")
 			return ret
 		if isinstance(expr, Index):
 			if not isinstance(expr.array, Var):
 				bhumi_report_error(getattr(expr.array, "lineno", None), getattr(expr.array, "col", None), f"Only direct variable array indexing is supported, got: {expr.array}")
 			arr_name = expr.array.name
-			_inc_read(arr_name, node_desc=f"Index@{getattr(expr,'lineno','?')}")
+			_inc_read(arr_name, node_desc=f"Index@{getattr(expr, 'lineno', '?')}")
 			var_typ = env.lookup(arr_name)
 			if not var_typ:
 				bhumi_report_error(getattr(expr.array, "lineno", None), getattr(expr.array, "col", None), f"Indexing undeclared variable '{arr_name}'")
@@ -4283,7 +4357,7 @@ def check_types(prog: Program):
 				if not match_list:
 					bhumi_report_error(getattr(fexpr, "lineno", None), getattr(fexpr, "col", None), f"Struct '{expr.name}' has no field '{fname}'")
 				declared_type = match_list[0]
-				actual_type = check_expr(fexpr)
+				actual_type = check_expr(fexpr, expected=declared_type)
 				if actual_type != declared_type:
 					bhumi_report_error(getattr(fexpr, "lineno", None), getattr(fexpr, "col", None), f"Struct '{expr.name}' field '{fname}': expected '{declared_type}', got '{actual_type}'")
 				seen_fields.add(fname)
@@ -4315,8 +4389,8 @@ def check_types(prog: Program):
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Unknown type '{raw_typ}'")
 			env.declare(stmt.name, raw_typ)
 			if stmt.expr:
-				expr_type = check_expr(stmt.expr)
-				_inc_write(stmt.name, node_desc=f"VarInit@{getattr(stmt,'lineno','?')}")
+				expr_type = check_expr(stmt.expr, expected=raw_typ)
+				_inc_write(stmt.name, node_desc=f"VarInit@{getattr(stmt, 'lineno', '?')}")
 				if isinstance(stmt.expr, AddressOf) and (raw_typ.endswith('*') or raw_typ == 'string'):
 					inner = stmt.expr.expr
 					if isinstance(inner, Var):
@@ -4381,7 +4455,7 @@ def check_types(prog: Program):
 				if not ptr_type.endswith('*'):
 					bhumi_report_error(getattr(stmt, "lineno", None), None, f"Dereferencing non-pointer type '{ptr_type}'")
 				pointee = ptr_type[:-1]
-				expr_type = check_expr(stmt.expr)
+				expr_type = check_expr(stmt.expr, expected=pointee)
 				if expr_type != pointee:
 					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, 'col', None), f"Type mismatch: attempted to store '{expr_type}' into '{ptr_type}'")
 				if base_var is not None and base_var in crumb_map:
@@ -4419,9 +4493,9 @@ def check_types(prog: Program):
 							bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Type mismatch in compound assignment '{stmt.expr.op}': {left_type} vs {right_type}")
 						common = left_type
 					expr_type = common
-				_inc_read(stmt.name, node_desc=f"CompoundAssignRead@{getattr(stmt,'lineno','?')}")
+				_inc_read(stmt.name, node_desc=f"CompoundAssignRead@{getattr(stmt, 'lineno', '?')}")
 			else:
-				expr_type = check_expr(stmt.expr)
+				expr_type = check_expr(stmt.expr, expected=var_type)
 			if expr_type == 'float' and var_type == 'float32':
 				stmt.expr = Cast('float32', stmt.expr)
 				expr_type = 'float32'
@@ -4436,7 +4510,7 @@ def check_types(prog: Program):
 				target_name = stmt.name if isinstance(stmt.name, str) else getattr(stmt.name, "name", None)
 				if isinstance(target_name, str) and target_name in cap and target_name not in exc:
 					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f'Variable "{target_name}" was accessed in a context where its value is volatile/unsure.')
-			_inc_write(stmt.name, node_desc=f"AssignWrite@{getattr(stmt,'lineno','?')}")
+			_inc_write(stmt.name, node_desc=f"AssignWrite@{getattr(stmt, 'lineno', '?')}")
 			if isinstance(stmt.expr, Var) and var_type.endswith('*'):
 				src_name = stmt.expr.name
 				if src_name != stmt.name:
@@ -4474,7 +4548,7 @@ def check_types(prog: Program):
 			if '[' not in var_type or not var_type.endswith(']'):
 				bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Index-assign to non-array variable '{var_type}'")
 			base_type = var_type.split('[', 1)[0]
-			_inc_write(arr_name, node_desc=f"IndexAssign@{getattr(stmt,'lineno','?')}")
+			_inc_write(arr_name, node_desc=f"IndexAssign@{getattr(stmt, 'lineno', '?')}")
 			idx_type = check_expr(stmt.index)
 			if idx_type != 'int':
 				bhumi_report_error(getattr(stmt.index, "lineno", None), getattr(stmt.index, "col", None), f"Array index must be 'int', got '{idx_type}'")
@@ -4488,7 +4562,7 @@ def check_types(prog: Program):
 				if cval is not None:
 					if cval < 0 or cval >= array_len:
 						bhumi_report_error(getattr(stmt.index, "lineno", None), getattr(stmt.index, "col", None), f"Array index constant {cval} out of bounds for array of length {array_len}")
-			val_type = check_expr(stmt.value)
+			val_type = check_expr(stmt.value, expected=base_type)
 			if val_type != base_type:
 				bhumi_report_error(getattr(stmt.value, "lineno", None), getattr(stmt.value, "col", None), f"Index-assign type mismatch: array of {base_type}, got {val_type}")
 			return
@@ -4519,18 +4593,20 @@ def check_types(prog: Program):
 			env.pop()
 			return
 		if isinstance(stmt, TypeSwitch):
-			if func is not None:
+			if func is not None and stmt.subject != '#':
 				if stmt.subject not in (func.type_params or []):
 					bhumi_report_error(None, None, f"typeswitch subject '{stmt.subject}' is not a type parameter")
 			for case in stmt.cases:
 				base_type = case.typ.rstrip('*')
 				if '[' in base_type and base_type.endswith(']'):
 					base_type = base_type.split('[', 1)[0]
-				if base_type not in type_map and base_type not in struct_defs and base_type not in enum_defs and base_type not in (func.type_params if func else []):
+				if base_type not in type_map and base_type not in struct_defs and base_type not in enum_defs and base_type not in (
+				func.type_params if func else []):
 					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Unknown type in typeswitch case: {case.typ}")
 				env.push()
+				case_expected = case.typ if stmt.subject == '#' else expected_ret
 				for s in case.body:
-					check_stmt(s, expected_ret, func)
+					check_stmt(s, case_expected, func)
 				env.pop()
 			if stmt.fallback:
 				env.push()
@@ -4540,7 +4616,7 @@ def check_types(prog: Program):
 			return
 		if isinstance(stmt, ReturnStmt):
 			if stmt.expr:
-				actual = check_expr(stmt.expr)
+				actual = check_expr(stmt.expr, expected=expected_ret)
 				if actual == 'float' and expected_ret == 'float32':
 					stmt.expr = Cast('float32', stmt.expr)
 					actual = 'float32'
