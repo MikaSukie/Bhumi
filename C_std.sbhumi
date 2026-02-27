@@ -57,7 +57,7 @@ pub extern fn finput(string input) <float>;
 
 pub fn input(string s) <#> {
     typeswitch(#) {
-        typecase(int) { return iinput(s);  }
+        typecase(int)   { return iinput(s); }
         typecase(float) { return finput(s); }
         typecase(bool)  { return binput(s); }
         typecase(string){ return sinput(s); }
