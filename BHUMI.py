@@ -172,16 +172,21 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str], expected_
 		mangled_parts.append(mangle_type(expected_ret))
 	mononame = f"{base_name}_" + "_".join(mangled_parts)
 	if mononame not in func_table:
-		base_fn = next((f for f in all_funcs if f.name == base_name and f.type_params), None)
+		base_fn = next(
+			(f for f in all_funcs
+			 if f.name == base_name and (f.type_params or f.ret_type == '#')),
+			None
+		)
 		if base_fn is None:
-			return mononame
+			bhumi_report_error(None, None, f"Attempted to monomorph unknown function '{base_name}'")
 		new_ret = base_fn.ret_type
 		if getattr(base_fn, "type_params", None) and new_ret in base_fn.type_params:
 			idx = base_fn.type_params.index(new_ret)
 			new_ret = actual_types[idx]
 		if new_ret == '#' and expected_ret is not None:
 			new_ret = expected_ret
-		func_table[mononame] = llvm_ty_of(new_ret)
+		if new_ret == '#':
+			bhumi_report_error(None, None, f"Cannot monomorph '{base_name}' without concrete return type")
 		if getattr(base_fn, "is_async", False):
 			struct_ty = f"%async.{mononame}"
 			func_table[f"{mononame}_init"] = f"{struct_ty}*"
@@ -191,6 +196,9 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str], expected_
 	return mononame
 def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optional[str] = None) -> str:
 	base_fn = next((f for f in all_funcs if f.name == call_expr.name), None)
+	if base_fn and base_fn.ret_type == '#':
+		if expected_ret is None:
+			bhumi_report_error(None, None, f"Cannot infer return type for '{call_expr.name}' — no expected type provided")
 	if not base_fn:
 		return call_expr.name
 	has_type_params = bool(getattr(base_fn, "type_params", None))
@@ -364,16 +372,15 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 				new_body.append(r)
 	new_fn = Func(base_fn.access, mononame, [], new_params, new_ret, new_body, base_fn.is_extern, base_fn.is_async)
 	all_funcs.append(new_fn)
+	if new_ret == '#':
+		bhumi_report_error(None, None, f"Cannot monomorph '{call_expr.name}' without concrete return type")
 	func_table[mononame] = llvm_ty_of(new_ret)
-	func_table.setdefault(call_expr.name, func_table[mononame])
 	generated_mono[mononame] = True
 	try:
 		llvm_lines = gen_func(new_fn)
 	except Exception:
 		generated_mono.pop(mononame, None)
 		func_table.pop(mononame, None)
-		if func_table.get(call_expr.name) == func_table.get(mononame):
-			func_table.pop(call_expr.name, None)
 		try:
 			all_funcs.remove(new_fn)
 		except ValueError:
@@ -857,6 +864,7 @@ loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
+unresolved_monos: Dict[str, bool] = {}
 class Parser:
 	def __init__(self, tokens: List[Token]):
 		self.declared_vars: Dict[str, VarDecl] = {}
@@ -1655,6 +1663,7 @@ type_map = {
 struct_llvm_defs: List[str] = []
 symbol_table = SymbolTable()
 func_table: Dict[str, str] = {}
+ssa_value_types: Dict[str, str] = {}
 def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str | None:
 	if isinstance(expr, CallerType):
 		bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "Internal compiler error: unresolved caller-placeholder '#' reached codegen (missing monomorphisation)")
@@ -2429,8 +2438,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 			ty2 = infer_type(arg)
 			arg_types.append(ty2)
 			arg_vals.append(a)
-			llvm_ty = llvm_ty_of(ty2)
-			args_ir.append(f"{llvm_ty} {a}")
 		found_enum = None
 		found_variant_idx = None
 		found_variant_payload = None
@@ -2454,7 +2461,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 					return tmp
 				else:
 					szptr = new_tmp()
-					out.append(f"  {szptr} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* null, i32 1")
+					out.append(
+						f"  {szptr} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* null, i32 1")
 					sz64 = new_tmp()
 					out.append(f"  {sz64} = ptrtoint %enum.{found_enum}* {szptr} to i64")
 					raw = new_tmp()
@@ -2462,7 +2470,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 					struct_ptr = new_tmp()
 					out.append(f"  {struct_ptr} = bitcast i8* {raw} to %enum.{found_enum}*")
 					tag_ptr = new_tmp()
-					out.append(f"  {tag_ptr} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* {struct_ptr}, i32 0, i32 0")
+					out.append(
+						f"  {tag_ptr} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* {struct_ptr}, i32 0, i32 0")
 					out.append(f"  store i32 {found_variant_idx}, i32* {tag_ptr}")
 					return struct_ptr
 			if found_variant_payload is not None:
@@ -2501,7 +2510,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 			bhumi_report_error(None, None, f"async function '{expr.name}' must be awaited")
 		args_ir = []
 		if concrete_fn:
-			for a_val, a_ty, (param_typ, _) in zip(arg_vals, arg_types, concrete_fn.params):
+			for (param_typ, _), a_val, a_ty in zip(concrete_fn.params, arg_vals, arg_types):
 				llvm_param_ty = llvm_ty_of(param_typ)
 				if a_val is None:
 					args_ir.append(f"{llvm_param_ty} {zero_const_for_llvm(llvm_param_ty)}")
@@ -2510,6 +2519,9 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 					args_ir.append(f"{llvm_param_ty} {cast_tmp}")
 		else:
 			for a_val, a_ty in zip(arg_vals, arg_types):
+				if a_ty == '#':
+					bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None),
+									   f"Cannot determine argument LLVM type for call '{expr.name}': argument type is '#'.")
 				llvm_ty = llvm_ty_of(a_ty)
 				if a_val is None:
 					args_ir.append(f"{llvm_ty} {zero_const_for_llvm(llvm_ty)}")
@@ -2517,7 +2529,11 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 					args_ir.append(f"{llvm_ty} {a_val}")
 		ret_ty = func_table.get(call_target, None)
 		if ret_ty is None:
-			bhumi_report_error(None, None, f"Call to undefined function '{expr.name}'")
+			if expected is not None:
+				call_target = ensure_monomorph_call(expr, out, expected_ret=expected)
+				ret_ty = func_table.get(call_target, None)
+		if ret_ty is None:
+			bhumi_report_error(None, None, f"Call to undefined function or unresolved monomorph '{expr.name}'")
 		if ret_ty == 'void':
 			out.append(f"  call void @{call_target}({', '.join(args_ir)})")
 			for arg_expr, arg_val in zip(expr.args, arg_vals):
@@ -2526,6 +2542,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 		else:
 			tmp2 = new_tmp()
 			out.append(f"  {tmp2} = call {ret_ty} @{call_target}({', '.join(args_ir)})")
+			if isinstance(tmp2, str) and tmp2.startswith('%'):
+				ssa_value_types[tmp2] = ret_ty
 			for arg_expr, arg_val in zip(expr.args, arg_vals):
 				_maybe_flush_deferred(arg_expr, arg_val)
 			return tmp2
@@ -2607,8 +2625,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 			else:
 				base_ptr = base_val
 		ptr = new_tmp()
-		out.append(
-			f"  {ptr} = getelementptr inbounds %struct.{base_name}, %struct.{base_name}* {base_ptr}, i32 0, i32 {index}")
+		out.append(f"  {ptr} = getelementptr inbounds %struct.{base_name}, %struct.{base_name}* {base_ptr}, i32 0, i32 {index}")
 		tmp = new_tmp()
 		out.append(f"  {tmp} = load {field_llvm}, {field_llvm}* {ptr}")
 		_maybe_flush_deferred(field_base, base_ptr)
@@ -2617,9 +2634,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 		struct_name = expr.name
 		struct_ty = f"%struct.{struct_name}"
 		size_tmp = new_tmp()
-		out.append(
-			f"  {size_tmp} = ptrtoint {struct_ty}* getelementptr ({struct_ty}, {struct_ty}* null, i32 1) to i64"
-		)
+		out.append(f"  {size_tmp} = ptrtoint {struct_ty}* getelementptr ({struct_ty}, {struct_ty}* null, i32 1) to i64")
 		malloc_tmp = new_tmp()
 		out.append(f"  {malloc_tmp} = call i8* @malloc(i64 {size_tmp})")
 		tmp_ptr = new_tmp()
@@ -2773,6 +2788,9 @@ def infer_type(expr: Expr) -> str:
 					if type_map.get(ename, "").startswith('i') and payload is None:
 						return ename
 					return ename + "*"
+		for fn in all_funcs:
+			if fn.name == expr.name and fn.ret_type == '#':
+				return '#'
 		if expr.name in func_table:
 			ret_llvm_ty = func_table[expr.name]
 			for k, v in type_map.items():
@@ -2889,7 +2907,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 		if promoted is not None and stmt.name in promoted:
 			if stmt.expr:
 				val = gen_expr(stmt.expr, out, expected=stmt.typ)
-				src_llvm = llvm_ty_of(infer_type(stmt.expr))
+				if isinstance(stmt.expr, Call):
+					call_target = ensure_monomorph_call(stmt.expr, out, expected_ret=stmt.typ)
+					src_llvm = func_table.get(call_target) or llvm_ty_of(infer_type(stmt.expr))
+				else:
+					src_llvm = llvm_ty_of(infer_type(stmt.expr))
 				if src_llvm != llvm_ty:
 					cast_tmp = new_tmp()
 					bits_src = llvm_int_bitsize(src_llvm)
@@ -2910,7 +2932,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			return
 		if stmt.expr:
 			val = gen_expr(stmt.expr, out, expected=stmt.typ)
-			src_llvm = llvm_ty_of(infer_type(stmt.expr))
+			if isinstance(stmt.expr, Call):
+				call_target = ensure_monomorph_call(stmt.expr, out, expected_ret=stmt.typ)
+				src_llvm = func_table.get(call_target) or llvm_ty_of(infer_type(stmt.expr))
+			else:
+				src_llvm = llvm_ty_of(infer_type(stmt.expr))
 			if llvm_ty.endswith('*') and src_llvm.endswith('*'):
 				if src_llvm != llvm_ty:
 					cast_tmp = new_tmp()
@@ -2927,6 +2953,9 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 			if src_llvm.endswith('*') and not llvm_ty.endswith('*'):
 				src_cast = new_tmp()
 				dst_cast = new_tmp()
+				if isinstance(val, str) and val.startswith('%'):
+					ssatok = val[1:]
+					bhumi_report_error(None, None, f"MEMCPY attempt: src_llvm={src_llvm}, val={val}")
 				out.append(f"  {src_cast} = bitcast {src_llvm} {val} to i8*")
 				out.append(f"  {dst_cast} = bitcast {llvm_ty}* %{ir_name}_addr to i8*")
 				size_tmp = new_tmp()
@@ -3349,6 +3378,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
 				out.append(f"  br label %{end_lbl}")
 		out.append(f"{end_lbl}:")
 def gen_func(fn: Func) -> List[str]:
+	ssa_value_types.clear()
+	unresolved_monos.clear()
 	if fn.type_params:
 		return []
 	if fn.ret_type == '#':
