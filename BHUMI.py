@@ -4624,15 +4624,21 @@ def check_types(prog: Program):
 			env.pop()
 			return
 		if isinstance(stmt, TypeSwitch):
-			if func is not None and stmt.subject != '#':
-				if stmt.subject not in (func.type_params or []):
-					bhumi_report_error(None, None, f"typeswitch subject '{stmt.subject}' is not a type parameter")
+			if stmt.subject == '#':
+				if func is None or func.ret_type != '#':
+					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None),
+						"typeswitch subject '#' is only allowed in functions whose declared return type is the caller-placeholder '<#>'.\n "
+						"Either change the function to return '<#>' (e.g. `fn foo() <#> { ... }`) or switch on a type parameter instead (e.g. `typeswitch(T)`)."
+					)
+			else:
+				if func is not None and stmt.subject not in (func.type_params or []):
+					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"typeswitch subject '{stmt.subject}' is not a type parameter")
 			for case in stmt.cases:
 				base_type = case.typ.rstrip('*')
 				if '[' in base_type and base_type.endswith(']'):
 					base_type = base_type.split('[', 1)[0]
 				if base_type not in type_map and base_type not in struct_defs and base_type not in enum_defs and base_type not in (
-				func.type_params if func else []):
+						func.type_params if func else []):
 					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Unknown type in typeswitch case: {case.typ}")
 				env.push()
 				case_expected = case.typ if stmt.subject == '#' else expected_ret
