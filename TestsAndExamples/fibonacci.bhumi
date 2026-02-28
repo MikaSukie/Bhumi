@@ -1,10 +1,14 @@
+import C_std;
+
 fn main() <void> {
-        int[2] f = [0, 1];
-        int i = 0;
-        int idx = 0;
-        while(i < 64) {
-            f[idx] = f[0] + f[1];
-            idx = 1 - idx;
-            i += 1;
-        }
+    int[2] f = [0, 1];
+    int i = 0;
+    int idx = 0;
+    int res = input("#: ");
+    while(i < res) {
+        f[idx] = f[0] + f[1];
+        idx = 1 - idx;
+        i += 1;
+        printnl(tostring(f[1 - idx]));
+    }
 }
