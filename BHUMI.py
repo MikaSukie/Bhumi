@@ -378,14 +378,14 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 	generated_mono[mononame] = True
 	try:
 		llvm_lines = gen_func(new_fn)
-	except Exception:
+	except Exception as e:
 		generated_mono.pop(mononame, None)
 		func_table.pop(mononame, None)
 		try:
 			all_funcs.remove(new_fn)
 		except ValueError:
 			pass
-		raise
+		bhumi_report_error(None, None, f"Codegen error while monomorphising '{mononame}': {e}")
 	out.insert(0, "\n".join(llvm_lines) + "\n")
 	return mononame
 def _subst_type(typ: Optional[str], subst: Dict[str, str]) -> Optional[str]:
