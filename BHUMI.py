@@ -2508,6 +2508,30 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 		concrete_fn = next((f for f in all_funcs if f.name == call_target), None)
 		if concrete_fn and concrete_fn.is_async:
 			bhumi_report_error(None, None, f"async function '{expr.name}' must be awaited")
+		def _promote_variadic_and_emit(a_val, a_ty, out):
+			if a_ty in ("float", "float32"):
+				target_bhumi_ty = "double"
+				llvm_ty = llvm_ty_of(target_bhumi_ty)
+				if a_val is None:
+					return llvm_ty, zero_const_for_llvm(llvm_ty)
+				promoted = emit_cast_value(a_val, a_ty, target_bhumi_ty, out)
+				return llvm_ty, promoted
+			small_int_names = {
+				"i8", "i16", "int8", "int16", "u8", "u16",
+				"uint8", "uint16", "char", "signed char", "unsigned char",
+				"short", "short int", "unsigned short", "i32", "int32"
+			}
+			if a_ty in small_int_names:
+				target_bhumi_ty = "int"
+				llvm_ty = llvm_ty_of(target_bhumi_ty)
+				if a_val is None:
+					return llvm_ty, zero_const_for_llvm(llvm_ty)
+				promoted = emit_cast_value(a_val, a_ty, target_bhumi_ty, out)
+				return llvm_ty, promoted
+			llvm_ty = llvm_ty_of(a_ty)
+			if a_val is None:
+				return llvm_ty, zero_const_for_llvm(llvm_ty)
+			return llvm_ty, a_val
 		args_ir = []
 		if concrete_fn:
 			for (param_typ, _), a_val, a_ty in zip(concrete_fn.params, arg_vals, arg_types):
@@ -2517,6 +2541,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 				else:
 					cast_tmp = emit_cast_value(a_val, a_ty, param_typ, out)
 					args_ir.append(f"{llvm_param_ty} {cast_tmp}")
+			if getattr(concrete_fn, "is_variadic", False):
+				fixed_count = len(concrete_fn.params)
+				for idx in range(fixed_count, len(arg_vals)):
+					a_val = arg_vals[idx]
+					a_ty = arg_types[idx]
+					llvm_ty, ssa_or_const = _promote_variadic_and_emit(a_val, a_ty, out)
+					args_ir.append(f"{llvm_ty} {ssa_or_const}")
 		else:
 			for a_val, a_ty in zip(arg_vals, arg_types):
 				if a_ty == '#':
