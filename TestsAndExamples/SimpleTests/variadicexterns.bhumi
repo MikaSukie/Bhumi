@@ -1,0 +1,10 @@
+import C_std;
+
+fn main() <void> {
+        int f = 42;
+        int* a = &f;
+        crumble(a)!r=1!w=0;
+        printf("%p", a);
+        newline();
+}
+extern fn printf(string s,) <void>;

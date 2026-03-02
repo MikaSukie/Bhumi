@@ -1,0 +1,10 @@
+pin int g = 0;
+
+vasync fn ok() except(g) <void> {
+    g = 5;     // allowed because g is listed inside of except(...)
+}
+
+fn main() <int> {
+    ok();
+    return 0;
+}

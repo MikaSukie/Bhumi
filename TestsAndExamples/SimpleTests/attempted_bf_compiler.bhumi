@@ -1,0 +1,59 @@
+import C_std;
+
+pin uint8[30000] gloarr;
+pin int pointer = 0;
+pin int index = 0;
+pin bool issyschar = false;
+
+pub fn main() <void> {
+        string sourcefile = try_read_file("main.bf");
+
+        if (!isequal(charat(-1, sourcefile), "SOF") &&
+        !streq(charat(slength(sourcefile), sourcefile), "EOF")) {
+                printnl("File does not exist!");
+                exit(1);
+        } else { printnl("File exists"); }
+
+        while (!isequal(sourcefile, "EOF")) {
+                if (isequal(sourcefile, ">")) { setissys(true); parsegt(); }
+                if (isequal(sourcefile, "<")) { setissys(true); parselt(); }
+                if (isequal(sourcefile, "-")) { setissys(true); parseminus(); }
+                if (isequal(sourcefile, "+")) { setissys(true); parseplus(); }
+                if (isequal(sourcefile, ".")) { setissys(true); parsedot(); }
+                if (isequal(sourcefile, ",")) { setissys(true); parsecomma(); }
+                if (isequal(sourcefile, "[")) { setissys(true); parselbracket(sourcefile); }
+                if (isequal(sourcefile, "]")) { setissys(true); parserbracket(sourcefile); }
+                if (index < slength(sourcefile)) { /* print(peek(sourcefile)); */ consume(); }
+        }
+        free_str(sourcefile);
+}
+
+pub fn isequal(string sourcefile, string comparee) <bool> {
+        return streq(peek(sourcefile), comparee);
+}
+
+pub fn peek(string sourcefile) <string> { return charat(index, sourcefile); }
+pub fn consume() <void> { index += 1; }
+pub fn consument() <void> { index -= 1; }
+pub fn setissys(bool b) <void> {
+        issyschar = b;
+}
+
+pub fn parsedot() <void> { print(itoa_ascii(gloarr[pointer])); }
+pub fn parsecomma() <void> { gloarr[pointer] = asciitoint8(input("")); }
+pub fn parsegt() <void> { pointer += 1; }
+pub fn parselt() <void> { if (pointer > 0) { pointer -= 1; } }
+pub fn parseplus() <void> { gloarr[pointer] = gloarr[pointer] + uint8(1); }
+pub fn parseminus() <void> { gloarr[pointer] = gloarr[pointer] - uint8(1); }
+pub fn parselbracket(string sourcefile) <void> {
+        if (gloarr[pointer] == uint8(0)) {
+                while (!isequal(sourcefile, "]")) { consume(); }
+                consume();
+        }
+}
+pub fn parserbracket(string sourcefile) <void> {
+        if (gloarr[pointer] != uint8(0)) {
+                while (!isequal(sourcefile, "[")) { consument(); }
+                consument();
+        }
+}
