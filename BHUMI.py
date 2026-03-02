@@ -24,7 +24,7 @@ def _visual_col(line: str, col: int, tabsize: int = 4) -> int:
 			visual += 1
 	return visual
 def bhumi_report_error( line: int | None, col: int | None, msg: str, length: int = 1) -> NoReturn:
-	print("error: " + str(msg))
+	print("[BhumiCompiler] Error: " + str(msg))
 	src_lines = _bhumi_get_source_lines()
 	if line is not None and 1 <= line <= len(src_lines):
 		raw_line = src_lines[line - 1]
