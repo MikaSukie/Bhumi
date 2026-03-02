@@ -172,7 +172,7 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str], expected_
 	mangled_parts = [mangle_type(a) for a in actual_types]
 	if expected_ret is not None:
 		mangled_parts.append(mangle_type(expected_ret))
-	mononame = f"{base_name}_" + "_".join(mangled_parts)
+	mononame = f"__mono__{base_name}_" + "_".join(mangled_parts)
 	if mononame not in func_table:
 		base_fn = next(
 			(f for f in all_funcs
@@ -228,7 +228,7 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 		mangled_parts.append(mangle_type(expected_ret))
 	if not mangled_parts and base_fn.ret_type != '#':
 		return call_expr.name
-	mononame = call_expr.name if not mangled_parts else f"{call_expr.name}_" + "_".join(mangled_parts)
+	mononame = call_expr.name if not mangled_parts else f"__mono__{call_expr.name}_" + "_".join(mangled_parts)
 	mono_map[mononame] = base_fn.name
 	if mononame in func_table:
 		return mononame
