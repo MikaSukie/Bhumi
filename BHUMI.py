@@ -356,7 +356,11 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 					return transform_body(body)
 			if s.fallback is not None:
 				return transform_body(s.fallback)
-			return []
+			bhumi_report_error(
+				getattr(s, "lineno", None),
+				getattr(s, "col", None),
+				f"typeswitch on '{subj}' has no matching typecase for instantiated type '{actual}' in monomorphised function '{base_fn.name}'. Add a matching typecase or a fallback."
+			)
 		return s
 	new_params = [(_subst_type(p[0], subst_map), p[1]) for p in base_fn.params]
 	new_ret = _subst_type(base_fn.ret_type, subst_map)
