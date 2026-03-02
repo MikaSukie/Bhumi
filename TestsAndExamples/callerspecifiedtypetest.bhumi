@@ -1,8 +1,0 @@
-extern fn printf(string s) <void>;
-fn main() <void> {
-    int f = name("e");
-}
-fn name(string s) <#> {
-    printf(typeof(#) + "\n");
-    return 0;
-}
