@@ -1,0 +1,4 @@
+pub extern fn create_server(int port, int backlog)      <int>;
+pub extern fn accept_client(int listen_fd)              <int>;
+pub extern fn send_response(int client_fd, string body) <int>;
+pub extern fn close_fd(int fd)                          <int>;

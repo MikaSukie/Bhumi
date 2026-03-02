@@ -1,0 +1,3 @@
+package_name = main
+c_sources = stdlib.c, inetbhumi.c
+bhumi_sources = main.bhumi
