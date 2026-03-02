@@ -172,7 +172,10 @@ def ensure_monomorph_for_call(base_name: str, actual_types: List[str], expected_
 	mangled_parts = [mangle_type(a) for a in actual_types]
 	if expected_ret is not None:
 		mangled_parts.append(mangle_type(expected_ret))
-	mononame = f"__mono__{base_name}_" + "_".join(mangled_parts)
+	if mangled_parts:
+		mononame = f"{base_name}__mono__" + "_".join(mangled_parts)
+	else:
+		mononame = base_name
 	if mononame not in func_table:
 		base_fn = next(
 			(f for f in all_funcs
@@ -228,7 +231,10 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 		mangled_parts.append(mangle_type(expected_ret))
 	if not mangled_parts and base_fn.ret_type != '#':
 		return call_expr.name
-	mononame = call_expr.name if not mangled_parts else f"__mono__{call_expr.name}_" + "_".join(mangled_parts)
+	if mangled_parts:
+		mononame = f"{call_expr.name}__mono__" + "_".join(mangled_parts)
+	else:
+		mononame = call_expr.name
 	mono_map[mononame] = base_fn.name
 	if mononame in func_table:
 		return mononame
@@ -1027,7 +1033,10 @@ class Parser:
 			size_tok = self.expect('INT')
 			self.expect('RBRACKET')
 			typ += f"[{size_tok.value}]"
-		name = self.expect('IDENT').value
+		ident_tok = self.expect('IDENT')
+		name = ident_tok.value
+		if "__mono__" in name:
+			bhumi_report_error(ident_tok.line, ident_tok.col, "Names containing '__mono__' are reserved for compiler-generated functions.")
 		expr = None
 		if self.match('EQUAL'):
 			expr = self.parse_expr()
@@ -1035,15 +1044,24 @@ class Parser:
 		return GlobalVar(typ, name, expr)
 	def parse_enum_def(self) -> EnumDef:
 		self.expect('ENUM')
-		name = self.expect('IDENT').value
+		ident_tok = self.expect('IDENT')
+		name = ident_tok.value
+		if "__mono__" in name:
+			bhumi_report_error(ident_tok.line, ident_tok.col, "Names containing '__mono__' are reserved for compiler-generated functions.")
 		type_param: Optional[str] = None
 		if self.match('LT'):
-			type_param = self.expect('IDENT').value
+			tp_tok = self.expect('IDENT')
+			if "__mono__" in tp_tok.value:
+				bhumi_report_error(tp_tok.line, tp_tok.col, "Type parameter names cannot contain '__mono__'.")
+			type_param = tp_tok.value
 			self.expect('GT')
 		self.expect('LBRACE')
 		variants: List[EnumVariant] = []
 		while self.peek().kind != 'RBRACE':
-			variant_name = self.expect('IDENT').value
+			v_tok = self.expect('IDENT')
+			variant_name = v_tok.value
+			if "__mono__" in variant_name:
+				bhumi_report_error(v_tok.line, v_tok.col, "Enum variant names cannot contain '__mono__'.")
 			variant_type: Optional[str] = None
 			prefix_amp = False
 			if self.peek().kind == 'AMP':
@@ -1104,7 +1122,10 @@ class Parser:
 		return EnumDef(name, type_param, variants)
 	def parse_struct_def(self) -> StructDef:
 		self.expect('STRUCT')
-		name = self.expect('IDENT').value
+		ident_tok = self.expect('IDENT')
+		name = ident_tok.value
+		if "__mono__" in name:
+			bhumi_report_error(ident_tok.line, ident_tok.col, "Names containing '__mono__' are reserved for compiler-generated functions.")
 		self.expect('LBRACE')
 		fields = []
 		while self.peek().kind != 'RBRACE':
@@ -1122,7 +1143,10 @@ class Parser:
 					size_tok = self.expect('INT')
 					self.expect('RBRACKET')
 					typ += f"[{size_tok.value}]"
-				fname = self.expect('IDENT').value
+				f_tok = self.expect('IDENT')
+				fname = f_tok.value
+				if "__mono__" in fname:
+					bhumi_report_error(f_tok.line, f_tok.col, "Field names cannot contain '__mono__'.")
 			else:
 				bhumi_report_error(self.peek().line, self.peek().col, f"Expected type in struct field, got {self.peek().kind}")
 			self.expect('SEMI')
@@ -1164,11 +1188,17 @@ class Parser:
 		if self.peek().kind == 'LBRACKET':
 			self.bump()
 			while True:
-				type_params.append(self.expect('IDENT').value)
+				tp_tok = self.expect('IDENT')
+				if "__mono__" in tp_tok.value:
+					bhumi_report_error(tp_tok.line, tp_tok.col, "Type parameter names cannot contain '__mono__'.")
+				type_params.append(tp_tok.value)
 				if not self.match('COMMA'):
 					break
 			self.expect('RBRACKET')
-		name = self.expect('IDENT').value
+		ident_tok = self.expect('IDENT')
+		name = ident_tok.value
+		if "__mono__" in name:
+			bhumi_report_error(ident_tok.line, ident_tok.col, "Names containing '__mono__' are reserved for compiler-generated functions.")
 		variadic = False
 		self.expect('LPAREN')
 		params: List[Tuple[str, str]] = []
@@ -1188,7 +1218,10 @@ class Parser:
 						size_tok = self.expect('INT')
 						self.expect('RBRACKET')
 						typ += f"[{size_tok.value}]"
-					pname = self.expect('IDENT').value
+					p_tok = self.expect('IDENT')
+					if "__mono__" in p_tok.value:
+						bhumi_report_error(p_tok.line, p_tok.col, "Parameter names cannot contain '__mono__'.")
+					pname = p_tok.value
 					params.append((typ, pname))
 				else:
 					bhumi_report_error(self.peek().line, self.peek().col, f"Expected type, got {self.peek().kind}")
@@ -1397,10 +1430,16 @@ class Parser:
 		self.expect('LBRACE')
 		cases: List[MatchCase] = []
 		while self.peek().kind != 'RBRACE':
-			variant_name = self.expect('IDENT').value
+			v_tok = self.expect('IDENT')
+			variant_name = v_tok.value
+			if "__mono__" in variant_name:
+				bhumi_report_error(v_tok.line, v_tok.col, "Match variant names cannot contain '__mono__'.")
 			binding_name: Optional[str] = None
 			if self.match('LPAREN'):
-				binding_name = self.expect('IDENT').value
+				b_tok = self.expect('IDENT')
+				binding_name = b_tok.value
+				if "__mono__" in binding_name:
+					bhumi_report_error(b_tok.line, b_tok.col, "Binding names cannot contain '__mono__'.")
 				self.expect('RPAREN')
 			self.expect('COLON')
 			self.expect('LBRACE')
@@ -1435,7 +1474,10 @@ class Parser:
 				typ += f"[{size_tok.value}]"
 		else:
 			bhumi_report_error(self.peek().line, self.peek().col, f"Expected type (one of {TYPE_TOKENS} or user-defined), got {self.peek().kind}")
-		name = self.expect('IDENT').value
+		ident_tok = self.expect('IDENT')
+		name = ident_tok.value
+		if "__mono__" in name:
+			bhumi_report_error(ident_tok.line, ident_tok.col, "Names containing '__mono__' are reserved for compiler-generated symbols.")
 		expr = None
 		if self.match('EQUAL'):
 			expr = self.parse_expr()
@@ -4745,12 +4787,15 @@ def check_types(prog: Program):
 				elif actual == 'float32' and expected_ret == 'float':
 					stmt.expr = Cast('float', stmt.expr)
 					actual = 'float'
+				if func is not None and (getattr(func, "type_params", None) or func.ret_type == '#'):
+					return
 				common = unify_int_types(actual, expected_ret)
 				if actual != expected_ret and (not common or common != expected_ret):
 					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Return type mismatch: expected {expected_ret}, got {actual}")
 			else:
-				if expected_ret != 'void':
-					bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Return without value in function returning {expected_ret}")
+				if not (func is not None and (getattr(func, "type_params", None) or func.ret_type == '#')):
+					if expected_ret != 'void':
+						bhumi_report_error(getattr(stmt, "lineno", None), getattr(stmt, "col", None), f"Return without value in function returning {expected_ret}")
 			return
 		if isinstance(stmt, ExprStmt):
 			check_expr(stmt.expr)
