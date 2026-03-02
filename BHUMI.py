@@ -1608,7 +1608,7 @@ class Parser:
 		if self.peek().kind == 'BANG':
 			self.bump()
 			inner = self.parse_primary()
-			return Call("!", [inner])
+			return UnaryOp('!', inner)
 		if self.peek().kind == 'MINUS':
 			self.bump()
 			inner = self.parse_primary()
@@ -1986,6 +1986,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 			return tmp
 		elif expr.op == '+':
 			return val
+		elif expr.op == '!':
+			if llvm_ty == 'i1':
+				out.append(f"  {tmp} = xor i1 {val}, 1")
+				_maybe_flush_deferred(expr.expr, val)
+				return tmp
+			else:
+				bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), f"Unary '!' requires bool operand, found {ty}")
 		elif expr.op == '~':
 			if llvm_ty.startswith('i'):
 				if llvm_ty == 'i1':
