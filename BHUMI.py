@@ -166,6 +166,8 @@ def zero_const_for_llvm(llvm_t: str) -> str:
 	if '*' in llvm_t or llvm_t.strip().startswith('%'):
 		return 'null'
 	return '0'
+def demangle_mononame(mononame: str) -> str:
+	return mono_map.get(mononame, mononame)
 def ensure_monomorph_for_call(base_name: str, actual_types: List[str], expected_ret: Optional[str] = None) -> str:
 	mangled_parts = [mangle_type(a) for a in actual_types]
 	if expected_ret is not None:
@@ -227,6 +229,7 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 	if not mangled_parts and base_fn.ret_type != '#':
 		return call_expr.name
 	mononame = call_expr.name if not mangled_parts else f"{call_expr.name}_" + "_".join(mangled_parts)
+	mono_map[mononame] = base_fn.name
 	if mononame in func_table:
 		return mononame
 	subst_map: Dict[str, str] = {}
@@ -256,7 +259,7 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 		if isinstance(e, (IntLit, FloatLit, BoolLit, StrLit, CharLit, NullLit)):
 			return e
 		if isinstance(e, Call):
-			return Call(e.name, [replace_in_expr(a) for a in e.args])
+			return Call(e.name, [replace_in_expr(a) for a in (e.args or [])])
 		if isinstance(e, UnaryOp):
 			return UnaryOp(e.op, replace_in_expr(e.expr))
 		if isinstance(e, BinOp):
@@ -287,6 +290,17 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 				return TypeofExpr(e.kind, CallerType())
 			return TypeofExpr(e.kind, replace_in_expr(e.expr))
 		return e
+	def transform_stmt_list(stmt_list):
+		out = []
+		for st in (stmt_list or []):
+			r = replace_in_stmt(st)
+			if r is None:
+				continue
+			if isinstance(r, list):
+				out.extend(r)
+			else:
+				out.append(r)
+		return out
 	def replace_in_stmt(s: Stmt):
 		if s is None:
 			return None
@@ -305,23 +319,23 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 			return ExprStmt(replace_in_expr(s.expr))
 		if isinstance(s, IfStmt):
 			cond0 = replace_in_expr(s.cond)
-			then_body0 = [replace_in_stmt(ss) for ss in s.then_body]
+			then_body0 = transform_stmt_list(s.then_body)
 			else_body0 = None
 			if s.else_body:
 				if isinstance(s.else_body, IfStmt):
 					else_body0 = replace_in_stmt(s.else_body)
 				else:
-					else_body0 = [replace_in_stmt(ss) for ss in s.else_body]
+					else_body0 = transform_stmt_list(s.else_body)
 			return IfStmt(cond0, then_body0, else_body0)
 		if isinstance(s, WhileStmt):
-			return WhileStmt(replace_in_expr(s.cond), [replace_in_stmt(ss) for ss in s.body])
+			return WhileStmt(replace_in_expr(s.cond), transform_stmt_list(s.body))
 		if isinstance(s, ReturnStmt):
 			return ReturnStmt(replace_in_expr(s.expr) if s.expr else None)
 		if isinstance(s, Match):
 			new_expr0 = replace_in_expr(s.expr)
 			new_cases = []
 			for case in s.cases:
-				new_body0 = [replace_in_stmt(ss) for ss in case.body]
+				new_body0 = transform_stmt_list(case.body)
 				new_cases.append(MatchCase(case.variant, case.binding, new_body0))
 			return Match(new_expr0, new_cases)
 		if isinstance(s, TypeSwitch):
@@ -329,7 +343,7 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 			actual = subst_map.get(subj)
 			def transform_body(body_list):
 				out_stmts = []
-				for ss in body_list:
+				for ss in (body_list or []):
 					r = replace_in_stmt(ss)
 					if r is None:
 						continue
@@ -354,13 +368,16 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 			for ct, body in processed_cases:
 				if ct == actual:
 					return transform_body(body)
+			if actual == 'int':
+				for ct, body in processed_cases:
+					if isinstance(ct, str) and ct.startswith('int'):
+						return transform_body(body)
+			for ct, body in processed_cases:
+				if unify_types(ct, actual) is not None:
+					return transform_body(body)
 			if s.fallback is not None:
 				return transform_body(s.fallback)
-			bhumi_report_error(
-				getattr(s, "lineno", None),
-				getattr(s, "col", None),
-				f"typeswitch on '{subj}' has no matching typecase for instantiated type '{actual}' in monomorphised function '{base_fn.name}'. Add a matching typecase or a fallback."
-			)
+			return []
 		return s
 	new_params = [(_subst_type(p[0], subst_map), p[1]) for p in base_fn.params]
 	new_ret = _subst_type(base_fn.ret_type, subst_map)
@@ -380,6 +397,38 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 		bhumi_report_error(None, None, f"Cannot monomorph '{call_expr.name}' without concrete return type")
 	func_table[mononame] = llvm_ty_of(new_ret)
 	generated_mono[mononame] = True
+	def all_paths_return(stmts):
+		if not stmts:
+			return False
+		i = 0
+		while i < len(stmts):
+			st = stmts[i]
+			if isinstance(st, ReturnStmt):
+				return True
+			if isinstance(st, IfStmt):
+				then_body = st.then_body or []
+				else_body = []
+				if st.else_body:
+					if isinstance(st.else_body, IfStmt):
+						else_body = [st.else_body]
+					else:
+						else_body = st.else_body
+				then_ret = all_paths_return(then_body)
+				else_ret = all_paths_return(else_body) if else_body else False
+				if then_ret and else_ret:
+					return True
+				i += 1
+				continue
+			i += 1
+		return False
+	if new_fn.ret_type is not None and new_fn.ret_type != 'void':
+		if not all_paths_return(new_fn.body or []):
+			bhumi_report_error(
+				getattr(new_fn, 'lineno', None),
+				getattr(new_fn, 'col', None),
+				f"Function '{demangle_mononame(mononame)}' may not return a value of type '{new_fn.ret_type}' on all control paths. "
+				"Add a matching typecase, a fallback, or a return statement."
+			)
 	try:
 		llvm_lines = gen_func(new_fn)
 	except Exception as e:
@@ -389,7 +438,7 @@ def ensure_monomorph_call(call_expr: 'Call', out: List[str], expected_ret: Optio
 			all_funcs.remove(new_fn)
 		except ValueError:
 			pass
-		bhumi_report_error(None, None, f"Codegen error while monomorphising '{mononame}': {e}")
+		bhumi_report_error(None, None, f"Codegen error while monomorphising '{demangle_mononame(mononame)}': {e}")
 	out.insert(0, "\n".join(llvm_lines) + "\n")
 	return mononame
 def _subst_type(typ: Optional[str], subst: Dict[str, str]) -> Optional[str]:
@@ -869,6 +918,7 @@ crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
 unresolved_monos: Dict[str, bool] = {}
+mono_map: Dict[str, str] = {}
 class Parser:
 	def __init__(self, tokens: List[Token]):
 		self.declared_vars: Dict[str, VarDecl] = {}
