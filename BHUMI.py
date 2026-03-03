@@ -2672,6 +2672,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
 			out.append(f"  call void @{call_target}({', '.join(args_ir)})")
 			for arg_expr, arg_val in zip(expr.args, arg_vals):
 				_maybe_flush_deferred(arg_expr, arg_val)
+				try:
+					if arg_val is not None and infer_type(arg_expr) == 'string' and isinstance(arg_expr, BinOp) and arg_expr.op == '+':
+						cast_tmp = new_tmp()
+						out.append(f"  {cast_tmp} = bitcast i8* {arg_val} to i8*")
+						out.append(f"  call void @free(i8* {cast_tmp})")
+				except Exception:
+					pass
 			return ''
 		else:
 			tmp2 = new_tmp()
