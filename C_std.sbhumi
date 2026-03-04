@@ -124,6 +124,30 @@ pub fn [T] tostring(T candidate) <string> {
     return "tostring has errored as no matching typecases were found.\n";
 }
 
+/* Legacy
+pub fn <T> tostring(T candidate) <string> {
+    if (streq(typeof(candidate), "int")) {
+        if(streq(get_os_max_bits(), "64")) {
+            return i64tostr(candidate);
+        } else if (streq(get_os_max_bits(), "32")) {
+            return i32tostr(candidate);
+        } else {
+            return itostr(candidate);
+        }
+    }
+    if (streq(typeof(candidate), "float")) {
+        return ftostr(candidate);
+    }
+    if (streq(typeof(candidate), "bool")) {
+        return btostr(candidate);
+    }
+    if (streq(typeof(candidate), "string")) {
+        return tostr(candidate);
+    }
+    return "ERROR";
+}
+*/
+
 pub fn [F] etostring(F candidate) <string> {
     typeswitch(F) {
         typecase(int8)  { return i8tostr(candidate);  }
@@ -148,3 +172,14 @@ pub extern fn Uget_bool(int h)       <bool>;
 pub extern fn Uget_string(int h)   <string>;
 
 pub extern fn Ufree_union(int h)     <void>;
+
+
+enum Exist<T> {
+  None;
+  Some: T;
+}
+
+enum Respond {
+    Ok: int;
+    Err: string;
+}
