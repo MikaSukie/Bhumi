@@ -6,7 +6,16 @@ pub fn main() <int> {
 }
 
 
+enum Option<T> {
+    Some(T);
+    None;
+}
+
 pub fn safe_div_direct(int a, int b) <Respond> {
+    
+    Option<int> x = Option::Some(42);
+    
+    printnl(typeof(x));
     if (b == 0) {
         return Err("division by zero");
     }
