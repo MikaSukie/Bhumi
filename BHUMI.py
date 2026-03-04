@@ -2938,6 +2938,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 out_str = raw[len("%struct.") :]
                 if out_str.endswith("*"):
                     out_str = out_str[:-1]
+            elif raw.startswith("%enum."):
+                out_str = raw[len("%enum."):]
+                if out_str.endswith("*"):
+                    out_str = out_str[:-1] + "*"
             elif raw.endswith("*"):
                 out_str = raw[:-1] + "*"
             else:
