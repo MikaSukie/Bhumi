@@ -3415,9 +3415,24 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                                     chosen = (ename, idx, payload)
                                     break
                 if chosen is None:
-                    chosen = candidates[0]
-                found_enum, found_variant_idx, found_variant_payload = chosen
-
+                    use_site_line = getattr(expr, "lineno", None)
+                    use_site_col = getattr(expr, "col", None)
+                    msg_lines = []
+                    msg_lines.append(f"ambiguous enum variant '{variant_name}'")
+                    msg_lines.append("")
+                    msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
+                    for ename, idx, payload in candidates:
+                        payload_desc = "no payload" if payload is None else f"payload={payload}"
+                        msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
+                    msg_lines.append("")
+                    msg_lines.append("To fix, use a namespaced (qualified) variant or add a type annotation so the compiler can disambiguate:")
+                    msg_lines.append(f"  - Qualify the variant:  {candidates[0][0]}::{variant_name}(...)  // e.g. Option::Some(42)")
+                    msg_lines.append("  - Add an explicit type for the target/scrutinee so the compiler knows which enum you mean.")
+                    msg_lines.append("  - Modify imports to bring only one variant into scope under a distinct name.")
+                    msg = "\n".join(msg_lines)
+                    bhumi_report_error(use_site_line, use_site_col, msg)
+                if chosen is not None:
+                    found_enum, found_variant_idx, found_variant_payload = chosen
         if found_enum is not None:
             template = globals().get("original_enum_defs", {}).get(found_enum)
             if template and template.type_params:
