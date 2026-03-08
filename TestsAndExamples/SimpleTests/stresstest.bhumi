@@ -322,7 +322,7 @@ pub fn test_async() <int> {
 
 // cast testing
 pub fn test_cast() <int> {
-    print(etypeof(int8(0)));
+    print(typeof(int8(0)));
     newline();
     return 0;
 }
@@ -342,7 +342,7 @@ pub fn test_enum1() <int> {
 // enum2
 enum Opt { None; Some: int; }
 pub fn test_enum2() <int> {
-  Opt o = Some(42);
+  Opt o = Opt::Some(42);
   match (o) {
     None:     { return 0; }
     Some(x):  { return x; }
