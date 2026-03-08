@@ -16,9 +16,7 @@ def _bhumi_get_source_lines():
             return f.read().splitlines()
     except Exception:
         return []
-def _visual_col(
-    line: str, col: int, tabsize: int = 4
-) -> int:
+def _visual_col(line: str, col: int, tabsize: int = 4) -> int:
     if col <= 1:
         return 0
     visual = 0
@@ -28,9 +26,7 @@ def _visual_col(
         else:
             visual += 1
     return visual
-def bhumi_report_error(
-    line: int | None, col: int | None, msg: str, length: int = 1
-) -> NoReturn:
+def bhumi_report_error(line: int | None, col: int | None, msg: str, length: int = 1) -> NoReturn:
     print("[BhumiCompiler] Error: " + str(msg))
     src_lines = _bhumi_get_source_lines()
     if line is not None and 1 <= line <= len(src_lines):
@@ -69,42 +65,17 @@ def llvm_to_lang(llvm_t: str) -> str:
         return "void*"
     return llvm_t
 TYPE_TOKENS = {
-    "IDENT",
-    "INT",
-    "INT8",
-    "INT16",
-    "INT32",
-    "INT64",
-    "FLOAT",
-    "STRING",
-    "BOOL",
-    "CHAR",
-    "VOID",
-    "UINT",
-    "UINT8",
-    "UINT16",
-    "UINT32",
-    "UINT64",
-    "FLOAT32",
-    "HASH",
+    "IDENT", "INT", "INT8", "INT16",
+    "INT32", "INT64", "FLOAT", "STRING",
+    "BOOL", "CHAR", "VOID", "UINT",
+    "UINT8", "UINT16", "UINT32", "UINT64",
+    "FLOAT32", "HASH",
 }
 CAST_TYPE_TOKENS = {
-    "INT",
-    "INT8",
-    "INT16",
-    "INT32",
-    "INT64",
-    "FLOAT",
-    "STRING",
-    "BOOL",
-    "CHAR",
-    "VOID",
-    "UINT",
-    "UINT8",
-    "UINT16",
-    "UINT32",
-    "UINT64",
-    "FLOAT32",
+    "INT", "INT8", "INT16", "INT32",
+    "INT64", "FLOAT", "STRING", "BOOL",
+    "CHAR", "VOID", "UINT", "UINT8",
+    "UINT16", "UINT32", "UINT64", "FLOAT32",
 }
 @dataclass
 class Token:
@@ -113,100 +84,29 @@ class Token:
     line: int
     col: int
 KEYWORDS = {
-    "fn",
-    "if",
-    "else",
-    "while",
-    "return",
-    "import",
-    "pub",
-    "priv",
-    "prot",
-    "extern",
-    "int",
-    "int8",
-    "int16",
-    "int32",
-    "int64",
-    "float",
-    "bool",
-    "char",
-    "string",
-    "void",
-    "true",
-    "false",
-    "struct",
-    "enum",
-    "match",
-    "nomd",
-    "pin",
-    "crumble",
-    "null",
-    "continue",
-    "break",
-    "async",
-    "await",
-    "uint",
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "float32",
-    "autoregion",
-    "except",
-    "vasync",
-    "vawait",
-    "typeswitch",
-    "typecase",
+    "fn", "if", "else", "while", "return",
+    "import", "pub", "priv", "prot", "extern",
+    "int", "int8", "int16", "int32", "int64",
+    "float", "bool", "char", "string", "void",
+    "true", "false", "struct", "enum", "match",
+    "nomd", "pin", "crumble", "null", "continue",
+    "break", "async", "await", "uint", "uint8",
+    "uint16", "uint32", "uint64", "float32", "autoregion",
+    "except", "vasync", "vawait", "typeswitch", "typecase",
     "fallback",
 }
 SINGLE_CHARS = {
-    "(": "LPAREN",
-    ")": "RPAREN",
-    "{": "LBRACE",
-    "}": "RBRACE",
-    ",": "COMMA",
-    ";": "SEMI",
-    "=": "EQUAL",
-    "+": "PLUS",
-    "-": "MINUS",
-    "*": "STAR",
-    "/": "SLASH",
-    "<": "LT",
-    ">": "GT",
-    "[": "LBRACKET",
-    "]": "RBRACKET",
-    "?": "QUESTION",
-    ".": "DOT",
-    ":": "COLON",
-    "%": "PERCENT",
-    "!": "BANG",
-    "&": "AMP",
-    "|": "PIPE",
-    "^": "CARET",
-    "#": "HASH",
+    "(": "LPAREN", ")": "RPAREN", "{": "LBRACE", "}": "RBRACE", ",": "COMMA",
+    ";": "SEMI", "=": "EQUAL", "+": "PLUS", "-": "MINUS", "*": "STAR",
+    "/": "SLASH", "<": "LT", ">": "GT", "[": "LBRACKET", "]": "RBRACKET",
+    "?": "QUESTION", ".": "DOT", ":": "COLON", "%": "PERCENT",
+    "!": "BANG", "&": "AMP", "|": "PIPE", "^": "CARET", "#": "HASH",
 }
 MULTI_CHARS = {
-    "==": "EQEQ",
-    "!=": "NEQ",
-    "<=": "LE",
-    ">=": "GE",
-    "->": "ARROW",
-    "&&": "AND",
-    "||": "OR",
-    "+=": "PLUSEQ",
-    "-=": "MINUSEQ",
-    "*=": "STAREQ",
-    "/=": "SLASHEQ",
-    "%=": "PERCENTEQ",
-    "&=": "ANDEQ",
-    "|=": "OREQ",
-    "^=": "XOREQ",
-    "<<=": "LSHIFTEQ",
-    ">>=": "RSHIFTEQ",
-    "<<": "LSHIFT",
-    ">>": "RSHIFT",
-    "~": "TILDE",
+    "==": "EQEQ", "!=": "NEQ", "<=": "LE", ">=": "GE", "->": "ARROW",
+    "&&": "AND", "||": "OR", "+=": "PLUSEQ", "-=": "MINUSEQ", "*=": "STAREQ",
+    "/=": "SLASHEQ", "%=": "PERCENTEQ", "&=": "ANDEQ", "|=": "OREQ", "^=": "XOREQ",
+    "<<=": "LSHIFTEQ", ">>=": "RSHIFTEQ", "<<": "LSHIFT", ">>": "RSHIFT", "~": "TILDE",
     "::": "SCOPE",
 }
 class SymbolTable:
@@ -2074,14 +1974,13 @@ class Parser:
                 return ArrayInit(elems)
             if (
                 t.kind == "IDENT"
-                and t.value in {"typeof", "etypeof"}
+                and t.value == "typeof"
                 and self.peek().kind == "LPAREN"
             ):
-                fn = t.value
                 self.expect("LPAREN")
                 arg_expr = self.parse_expr()
                 self.expect("RPAREN")
-                return TypeofExpr(fn, arg_expr)
+                return TypeofExpr("typeof", arg_expr)
             if (
                 t.kind in TYPE_TOKENS
                 and t.kind != "IDENT"
@@ -2823,14 +2722,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 type_arg = type_arg.replace("_ptr", "*")
                 base = f"{enum_base}<{type_arg}>"
             return base
-        if expr.kind == "etypeof":
-            out_str = raw
-        elif expr.kind == "typeof":
-            if raw.startswith("int") and raw != "int":
-                out_str = "int"
-            elif raw == "float":
-                out_str = "float"
-            elif raw.startswith("%struct.") or raw.startswith("%enum.") or "__mono__" in raw or raw.endswith("*"):
+        if expr.kind == "typeof":
+            if raw.startswith("%struct.") or raw.startswith("%enum.") or "__mono__" in raw or raw.endswith("*"):
                 out_str = _pretty_mono(raw)
             else:
                 out_str = raw
@@ -3764,7 +3657,7 @@ def infer_type(expr: Expr) -> str:
             return llvm_ty[len("%struct.") : -1] + "*"
         return llvm_ty
     if isinstance(expr, TypeofExpr):
-        if expr.kind in {"typeof", "etypeof"}:
+        if expr.kind == "typeof":
             return "string"
     if isinstance(expr, FieldAccess):
         if isinstance(expr.base, Var) and expr.base.name in enum_variant_map:
@@ -5453,7 +5346,7 @@ def check_types(prog: Program):
             return typ
         if isinstance(expr, TypeofExpr):
             inner_type = check_expr(expr.expr)
-            if expr.kind in {"typeof", "etypeof"}:
+            if expr.kind == "typeof":
                 return "string"
         if isinstance(expr, Ternary):
             cond_type = check_expr(expr.cond)
