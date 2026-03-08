@@ -342,7 +342,7 @@ pub fn test_enum1() <int> {
 // enum2
 enum Opt { None; Some: int; }
 pub fn test_enum2() <int> {
-  Opt o = Opt::Some(42);
+  Opt o = Opt:Some(42);
   match (o) {
     None:     { return 0; }
     Some(x):  { return x; }
