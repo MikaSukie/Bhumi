@@ -16,7 +16,9 @@ def _bhumi_get_source_lines():
             return f.read().splitlines()
     except Exception:
         return []
-def _visual_col(line: str, col: int, tabsize: int = 4) -> int:
+def _visual_col(
+    line: str, col: int, tabsize: int = 4
+) -> int:
     if col <= 1:
         return 0
     visual = 0
@@ -26,7 +28,9 @@ def _visual_col(line: str, col: int, tabsize: int = 4) -> int:
         else:
             visual += 1
     return visual
-def bhumi_report_error(line: int | None, col: int | None, msg: str, length: int = 1) -> NoReturn:
+def bhumi_report_error(
+    line: int | None, col: int | None, msg: str, length: int = 1
+) -> NoReturn:
     print("[BhumiCompiler] Error: " + str(msg))
     src_lines = _bhumi_get_source_lines()
     if line is not None and 1 <= line <= len(src_lines):
@@ -65,17 +69,42 @@ def llvm_to_lang(llvm_t: str) -> str:
         return "void*"
     return llvm_t
 TYPE_TOKENS = {
-    "IDENT", "INT", "INT8", "INT16",
-    "INT32", "INT64", "FLOAT", "STRING",
-    "BOOL", "CHAR", "VOID", "UINT",
-    "UINT8", "UINT16", "UINT32", "UINT64",
-    "FLOAT32", "HASH",
+    "IDENT",
+    "INT",
+    "INT8",
+    "INT16",
+    "INT32",
+    "INT64",
+    "FLOAT",
+    "STRING",
+    "BOOL",
+    "CHAR",
+    "VOID",
+    "UINT",
+    "UINT8",
+    "UINT16",
+    "UINT32",
+    "UINT64",
+    "FLOAT32",
+    "HASH",
 }
 CAST_TYPE_TOKENS = {
-    "INT", "INT8", "INT16", "INT32",
-    "INT64", "FLOAT", "STRING", "BOOL",
-    "CHAR", "VOID", "UINT", "UINT8",
-    "UINT16", "UINT32", "UINT64", "FLOAT32",
+    "INT",
+    "INT8",
+    "INT16",
+    "INT32",
+    "INT64",
+    "FLOAT",
+    "STRING",
+    "BOOL",
+    "CHAR",
+    "VOID",
+    "UINT",
+    "UINT8",
+    "UINT16",
+    "UINT32",
+    "UINT64",
+    "FLOAT32",
 }
 @dataclass
 class Token:
@@ -84,29 +113,100 @@ class Token:
     line: int
     col: int
 KEYWORDS = {
-    "fn", "if", "else", "while", "return",
-    "import", "pub", "priv", "prot", "extern",
-    "int", "int8", "int16", "int32", "int64",
-    "float", "bool", "char", "string", "void",
-    "true", "false", "struct", "enum", "match",
-    "nomd", "pin", "crumble", "null", "continue",
-    "break", "async", "await", "uint", "uint8",
-    "uint16", "uint32", "uint64", "float32", "autoregion",
-    "except", "vasync", "vawait", "typeswitch", "typecase",
+    "fn",
+    "if",
+    "else",
+    "while",
+    "return",
+    "import",
+    "pub",
+    "priv",
+    "prot",
+    "extern",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "float",
+    "bool",
+    "char",
+    "string",
+    "void",
+    "true",
+    "false",
+    "struct",
+    "enum",
+    "match",
+    "nomd",
+    "pin",
+    "crumble",
+    "null",
+    "continue",
+    "break",
+    "async",
+    "await",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "float32",
+    "autoregion",
+    "except",
+    "vasync",
+    "vawait",
+    "typeswitch",
+    "typecase",
     "fallback",
 }
 SINGLE_CHARS = {
-    "(": "LPAREN", ")": "RPAREN", "{": "LBRACE", "}": "RBRACE", ",": "COMMA",
-    ";": "SEMI", "=": "EQUAL", "+": "PLUS", "-": "MINUS", "*": "STAR",
-    "/": "SLASH", "<": "LT", ">": "GT", "[": "LBRACKET", "]": "RBRACKET",
-    "?": "QUESTION", ".": "DOT", ":": "COLON", "%": "PERCENT",
-    "!": "BANG", "&": "AMP", "|": "PIPE", "^": "CARET", "#": "HASH",
+    "(": "LPAREN",
+    ")": "RPAREN",
+    "{": "LBRACE",
+    "}": "RBRACE",
+    ",": "COMMA",
+    ";": "SEMI",
+    "=": "EQUAL",
+    "+": "PLUS",
+    "-": "MINUS",
+    "*": "STAR",
+    "/": "SLASH",
+    "<": "LT",
+    ">": "GT",
+    "[": "LBRACKET",
+    "]": "RBRACKET",
+    "?": "QUESTION",
+    ".": "DOT",
+    ":": "COLON",
+    "%": "PERCENT",
+    "!": "BANG",
+    "&": "AMP",
+    "|": "PIPE",
+    "^": "CARET",
+    "#": "HASH",
 }
 MULTI_CHARS = {
-    "==": "EQEQ", "!=": "NEQ", "<=": "LE", ">=": "GE", "->": "ARROW",
-    "&&": "AND", "||": "OR", "+=": "PLUSEQ", "-=": "MINUSEQ", "*=": "STAREQ",
-    "/=": "SLASHEQ", "%=": "PERCENTEQ", "&=": "ANDEQ", "|=": "OREQ", "^=": "XOREQ",
-    "<<=": "LSHIFTEQ", ">>=": "RSHIFTEQ", "<<": "LSHIFT", ">>": "RSHIFT", "~": "TILDE",
+    "==": "EQEQ",
+    "!=": "NEQ",
+    "<=": "LE",
+    ">=": "GE",
+    "->": "ARROW",
+    "&&": "AND",
+    "||": "OR",
+    "+=": "PLUSEQ",
+    "-=": "MINUSEQ",
+    "*=": "STAREQ",
+    "/=": "SLASHEQ",
+    "%=": "PERCENTEQ",
+    "&=": "ANDEQ",
+    "|=": "OREQ",
+    "^=": "XOREQ",
+    "<<=": "LSHIFTEQ",
+    ">>=": "RSHIFTEQ",
+    "<<": "LSHIFT",
+    ">>": "RSHIFT",
+    "~": "TILDE",
     "::": "SCOPE",
 }
 class SymbolTable:
@@ -401,8 +501,8 @@ def ensure_monomorph_call(
                 concrete = subst_map.get("#")
                 if concrete is not None:
                     return StrLit(concrete)
-                return TypeofExpr(e.kind, CallerType())
-            return TypeofExpr(e.kind, replace_in_expr(e.expr))
+                return TypeofExpr(CallerType())
+            return TypeofExpr(replace_in_expr(e.expr))
         return e
     def transform_stmt_list(stmt_list):
         out = []
@@ -1027,7 +1127,6 @@ class Index(Expr):
     index: Expr
 @dataclass
 class TypeofExpr(Expr):
-    kind: str
     expr: Expr
 @dataclass
 class ContinueStmt(Stmt):
@@ -1089,7 +1188,6 @@ loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
-unresolved_monos: Dict[str, bool] = {}
 mono_map: Dict[str, str] = {}
 class Parser:
     def __init__(self, tokens: List[Token]):
@@ -1224,41 +1322,6 @@ class Parser:
                 funcs.append(self.parse_func())
         self.program = Program(funcs, imports, structs, enums, globals)
         return self.program
-    def parse_global(self) -> GlobalVar:
-        prefix_amp = False
-        if self.peek().kind == "AMP":
-            self.bump()
-            prefix_amp = True
-        if self.peek().kind not in TYPE_TOKENS and self.peek().kind != "IDENT":
-            bhumi_report_error(
-                self.peek().line,
-                self.peek().col,
-                f"Expected type after 'pin', got {self.peek().kind}",
-            )
-        typ = self.parse_type()
-        ident_tok = self.expect("IDENT")
-        name = ident_tok.value
-        if prefix_amp or self.match("AMP"):
-            typ += "*"
-        while self.match("STAR"):
-            typ += "*"
-        if self.match("LBRACKET"):
-            size_tok = self.expect("INT")
-            self.expect("RBRACKET")
-            typ += f"[{size_tok.value}]"
-        ident_tok = self.expect("IDENT")
-        name = ident_tok.value
-        if "__mono__" in name:
-            bhumi_report_error(
-                ident_tok.line,
-                ident_tok.col,
-                "Names containing '__mono__' are reserved for compiler-generated functions.",
-            )
-        expr = None
-        if self.match("EQUAL"):
-            expr = self.parse_expr()
-        self.expect("SEMI")
-        return GlobalVar(typ, name, expr)
     def parse_type(self) -> str:
         prefix_amp = False
         if self.peek().kind == "AMP":
@@ -1387,7 +1450,6 @@ class Parser:
         is_extern = False
         is_async = False
         is_vasync = False
-        modifiers = []
         while True:
             tk = self.peek().kind
             if tk == "EXTERN":
@@ -1413,7 +1475,7 @@ class Parser:
                 self.bump()
                 continue
             if tk != "FN" and tk.lower() in KEYWORDS:
-                modifiers.append(self.bump().value)
+                self.bump()
                 continue
             break
         self.expect("FN")
@@ -1801,27 +1863,6 @@ class Parser:
         value = self.parse_expr()
         self.expect("SEMI")
         return IndexAssign(arr_name, index, value)
-    def parse_assign(self) -> Assign:
-        name = self.expect("IDENT").value
-        decl = self.declared_vars.get(name)
-        if decl and decl.nomd:
-            bhumi_report_error(
-                None, None, f"Cannot assign to local 'nomd' variable '{name}'"
-            )
-        if not decl and hasattr(self, "program"):
-            for g in self.program.globals:
-                if g.name == name:
-                    if g.nomd:
-                        bhumi_report_error(
-                            None,
-                            None,
-                            f"Cannot assign to global 'nomd' variable '{name}'",
-                        )
-                    break
-        self.expect("EQUAL")
-        expr = self.parse_expr()
-        self.expect("SEMI")
-        return Assign(name, expr)
     def parse_if(self) -> IfStmt:
         self.expect("IF")
         self.expect("LPAREN")
@@ -1980,7 +2021,7 @@ class Parser:
                 self.expect("LPAREN")
                 arg_expr = self.parse_expr()
                 self.expect("RPAREN")
-                return TypeofExpr("typeof", arg_expr)
+                return TypeofExpr(arg_expr)
             if (
                 t.kind in TYPE_TOKENS
                 and t.kind != "IDENT"
@@ -2141,7 +2182,6 @@ type_map = {
 struct_llvm_defs: List[str] = []
 symbol_table = SymbolTable()
 func_table: Dict[str, str] = {}
-ssa_value_types: Dict[str, str] = {}
 def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str | None:
     if isinstance(expr, CallerType):
         bhumi_report_error(
@@ -2314,6 +2354,12 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  {cast_tmp} = ptrtoint {src_llvm} {val} to {dst_llvm}")
             return cast_tmp
         bhumi_report_error(None, None, f"Unsupported cast from {src_t} -> {dst_t}")
+    if isinstance(expr, VAwaitExpr):
+        bhumi_report_error(
+            getattr(expr, "lineno", None),
+            getattr(expr, "col", None),
+            "vawait is not yet supported in codegen; use await instead",
+        )
     if isinstance(expr, AwaitExpr):
         inner = expr.expr
         if isinstance(inner, Call):
@@ -2722,17 +2768,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 type_arg = type_arg.replace("_ptr", "*")
                 base = f"{enum_base}<{type_arg}>"
             return base
-        if expr.kind == "typeof":
-            if raw.startswith("%struct.") or raw.startswith("%enum.") or "__mono__" in raw or raw.endswith("*"):
-                out_str = _pretty_mono(raw)
-            else:
-                out_str = raw
+        if raw.startswith("%struct.") or raw.startswith("%enum.") or "__mono__" in raw or raw.endswith("*"):
+            out_str = _pretty_mono(raw)
         else:
-            bhumi_report_error(
-                getattr(expr, "lineno", None),
-                getattr(expr, "col", None),
-                f"{expr.kind} is not a supported typeof variant",
-            )
+            out_str = raw
         label = f"@.str{len(string_constants)}"
         esc = out_str.replace('"', r"\"")
         byte_len = len(out_str.encode("utf-8")) + 1
@@ -3081,6 +3120,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             arg_vals.append(a)
         candidates = []
         for ename, variants in enum_variant_map.items():
+            if "__mono__" in ename:
+                continue
             for idx, (vname, payload) in enumerate(variants):
                 if vname == variant_name and (
                         qualified_enum is None or ename == qualified_enum
@@ -3088,7 +3129,14 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     candidates.append((ename, idx, payload))
         gm = globals().get("variant_map_global")
         if gm and expr.name in gm:
+            existing_enames = {c[0] for c in candidates}
             for ename, payload in gm[expr.name]:
+                if ename in existing_enames:
+                    continue
+                if "__mono__" in ename:
+                    continue
+                if qualified_enum is not None and ename != qualified_enum:
+                    continue
                 for idx, (vname2, payload2) in enumerate(enum_variant_map.get(ename, [])):
                     if vname2 == expr.name:
                         candidates.append((ename, idx, payload2))
@@ -3100,65 +3148,19 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             if len(candidates) == 1:
                 found_enum, found_variant_idx, found_variant_payload = candidates[0]
             else:
-                chosen = None
-                def enum_matches_expected(ename: str, expected: str) -> bool:
-                    if ename == expected:
-                        return True
-                    m = re.fullmatch(r"([A-Za-z_]\w*)(<.*>)?", expected)
-                    if m:
-                        expected_base = m.group(1)
-                        if expected_base == ename:
-                            return True
-                    if expected.startswith(ename + "__mono__") or ename.startswith(expected + "__mono__"):
-                        return True
-                    if expected.endswith(ename) or ename.endswith(expected):
-                        return True
-                    return False
-                if expected is not None:
-                    for ename, idx, payload in candidates:
-                        if enum_matches_expected(ename, expected):
-                            chosen = (ename, idx, payload)
-                            break
-                if chosen is None:
-                    if len(arg_types) == 0:
-                        for ename, idx, payload in candidates:
-                            if payload is None:
-                                chosen = (ename, idx, payload)
-                                break
-                    elif len(arg_types) == 1:
-                        arg_t = arg_types[0]
-                        for ename, idx, payload in candidates:
-                            if payload == arg_t:
-                                chosen = (ename, idx, payload)
-                                break
-                        if chosen is None:
-                            unify_matches = []
-                            for ename, idx, payload in candidates:
-                                if payload is None:
-                                    continue
-                                if (
-                                        unify_types(payload, arg_t) is not None
-                                        or unify_types(arg_t, payload) is not None
-                                ):
-                                    unify_matches.append((ename, idx, payload))
-                            if len(unify_matches) == 1:
-                                chosen = unify_matches[0]
-                if chosen is None:
-                    use_site_line = getattr(expr, "lineno", None)
-                    use_site_col = getattr(expr, "col", None)
-                    msg_lines = []
-                    msg_lines.append(f"ambiguous enum variant '{variant_name}'")
-                    msg_lines.append("")
-                    msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
-                    for ename, payload in candidates:
-                        payload_desc = "no payload" if payload is None else f"payload={payload}"
-                        msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
-                    msg_lines.append("")
-                    msg_lines.append("To fix, say which one you want to use, or take the other out of scope:")
-                    msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}::{variant_name}(...)")
-                    bhumi_report_error(use_site_line, use_site_col, "\n".join(msg_lines))
-                if chosen is not None:
-                    found_enum, found_variant_idx, found_variant_payload = chosen
+                use_site_line = getattr(expr, "lineno", None)
+                use_site_col = getattr(expr, "col", None)
+                msg_lines = []
+                msg_lines.append(f"ambiguous enum variant '{variant_name}'")
+                msg_lines.append("")
+                msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
+                for ename, idx, payload in candidates:
+                    payload_desc = "no payload" if payload is None else f"payload={payload}"
+                    msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
+                msg_lines.append("")
+                msg_lines.append("To fix, qualify the variant with its enum name:")
+                msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}::{variant_name}(...)")
+                bhumi_report_error(use_site_line, use_site_col, "\n".join(msg_lines))
         if found_enum is not None:
             template = globals().get("original_enum_defs", {}).get(found_enum)
             if template and template.type_params:
@@ -3383,8 +3385,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         else:
             tmp2 = new_tmp()
             out.append(f"  {tmp2} = call {ret_ty} @{call_target}({', '.join(args_ir)})")
-            if isinstance(tmp2, str) and tmp2.startswith("%"):
-                ssa_value_types[tmp2] = ret_ty
             for arg_expr, arg_val in zip(expr.args, arg_vals):
                 _maybe_flush_deferred(arg_expr, arg_val)
             return tmp2
@@ -3657,8 +3657,7 @@ def infer_type(expr: Expr) -> str:
             return llvm_ty[len("%struct.") : -1] + "*"
         return llvm_ty
     if isinstance(expr, TypeofExpr):
-        if expr.kind == "typeof":
-            return "string"
+        return "string"
     if isinstance(expr, FieldAccess):
         if isinstance(expr.base, Var) and expr.base.name in enum_variant_map:
             return "int"
@@ -3737,20 +3736,31 @@ def infer_type(expr: Expr) -> str:
         _infer_variant_name = expr.name
         if "::" in expr.name:
             _infer_qualified_enum, _infer_variant_name = expr.name.split("::", 1)
+        _infer_matches = []
         for ename, variants in enum_variant_map.items():
-            if _infer_qualified_enum is not None and ename != _infer_qualified_enum and not ename.startswith(_infer_qualified_enum + "__mono__"):
+            if "__mono__" in ename:
+                continue
+            if _infer_qualified_enum is not None and ename != _infer_qualified_enum:
                 continue
             for vname, payload in variants:
                 if vname == _infer_variant_name:
                     _orig_edef = globals().get("original_enum_defs", {}).get(ename)
                     _tparams = getattr(_orig_edef, "type_params", []) if _orig_edef else []
-                    if _tparams and payload in _tparams and expr.args:
-                        _actual_t = infer_type(expr.args[0])
-                        _mono = ensure_monomorph_for_enum(ename, [_actual_t])
-                        return _mono + "*"
-                    if type_map.get(ename, "").startswith("i") and payload is None:
-                        return ename
-                    return ename + "*"
+                    _infer_matches.append((ename, payload, bool(_tparams)))
+                    break
+        if _infer_matches:
+            _concrete_matches = [(e, p, g) for e, p, g in _infer_matches if not g]
+            _chosen = _concrete_matches[0] if _concrete_matches else _infer_matches[0]
+            ename, payload, has_tparams = _chosen
+            _orig_edef = globals().get("original_enum_defs", {}).get(ename)
+            _tparams = getattr(_orig_edef, "type_params", []) if _orig_edef else []
+            if _tparams and payload in _tparams and expr.args:
+                _actual_t = infer_type(expr.args[0])
+                _mono = ensure_monomorph_for_enum(ename, [_actual_t])
+                return _mono + "*"
+            if type_map.get(ename, "").startswith("i") and payload is None:
+                return ename
+            return ename + "*"
         for fn in all_funcs:
             if fn.name == expr.name and fn.ret_type == "#":
                 return "#"
@@ -3837,7 +3847,6 @@ def infer_type(expr: Expr) -> str:
         f"Cannot infer type for expression: {expr}",
     )
 def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
-    promoted = globals().get("current_async_promoted", None)
     if isinstance(stmt, VarDecl):
         def _pick_ir_name(name):
             existing = None
@@ -3863,11 +3872,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"  %{ir_name}_len  = alloca i32")
                 out.append(f"  store i32 {count}, i32* %{ir_name}_len")
                 symbol_table.declare(stmt.name, llvm_ty, ir_name)
-            if promoted is not None and stmt.name in promoted:
-                if stmt.expr:
-                    val = gen_expr(stmt.expr, out, expected=stmt.typ)
-                    out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
-                return
             if stmt.expr:
                 val = gen_expr(stmt.expr, out, expected=stmt.typ)
                 src_cast = new_tmp()
@@ -3896,40 +3900,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     f"  store {llvm_ty} zeroinitializer, {llvm_ty}* %{ir_name}_addr"
                 )
             symbol_table.declare(stmt.name, llvm_ty, ir_name)
-        if promoted is not None and stmt.name in promoted:
-            if stmt.expr:
-                val = gen_expr(stmt.expr, out, expected=stmt.typ)
-                if isinstance(stmt.expr, Call):
-                    call_target = ensure_monomorph_call(
-                        stmt.expr, out, expected_ret=stmt.typ
-                    )
-                    src_llvm = func_table.get(call_target) or llvm_ty_of(
-                        infer_type(stmt.expr)
-                    )
-                else:
-                    src_llvm = llvm_ty_of(infer_type(stmt.expr))
-                if src_llvm != llvm_ty:
-                    cast_tmp = new_tmp()
-                    bits_src = llvm_int_bitsize(src_llvm)
-                    bits_dst = llvm_int_bitsize(llvm_ty)
-                    if bits_src and bits_dst:
-                        if bits_src > bits_dst:
-                            out.append(
-                                f"  {cast_tmp} = trunc {src_llvm} {val} to {llvm_ty}"
-                            )
-                        else:
-                            out.append(
-                                f"  {cast_tmp} = sext {src_llvm} {val} to {llvm_ty}"
-                            )
-                        val = cast_tmp
-                out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
-                if isinstance(stmt.expr, Call):
-                    ret_t = infer_type(stmt.expr)
-                    if ret_t is not None and (ret_t.endswith("*") or ret_t == "string"):
-                        owned_vars.add(stmt.name)
-                        if stmt.name in crumb_runtime:
-                            crumb_runtime[stmt.name]["owned"] = True
-            return
         if stmt.expr:
             val = gen_expr(stmt.expr, out, expected=stmt.typ)
             if isinstance(stmt.expr, Call):
@@ -3955,23 +3925,9 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             crumb_runtime[stmt.name]["owned"] = True
                 return
             if src_llvm.endswith("*") and not llvm_ty.endswith("*"):
-                src_cast = new_tmp()
-                dst_cast = new_tmp()
-                if isinstance(val, str) and val.startswith("%"):
-                    ssatok = val[1:]
-                    bhumi_report_error(
-                        None, None, f"MEMCPY attempt: src_llvm={src_llvm}, val={val}"
-                    )
-                out.append(f"  {src_cast} = bitcast {src_llvm} {val} to i8*")
-                out.append(f"  {dst_cast} = bitcast {llvm_ty}* %{ir_name}_addr to i8*")
-                size_tmp = new_tmp()
-                out.append(
-                    f"  {size_tmp} = ptrtoint {llvm_ty}* getelementptr ({llvm_ty}, {llvm_ty}* null, i32 1) to i64"
+                bhumi_report_error(
+                    None, None, f"Type error: cannot assign pointer {src_llvm} into non-pointer {llvm_ty}"
                 )
-                out.append(
-                    f"  call void @llvm.memcpy.p0i8.p0i8.i64(i8* {dst_cast}, i8* {src_cast}, i64 {size_tmp}, i1 false)"
-                )
-                return
             if src_llvm != llvm_ty:
                 cast_tmp = new_tmp()
                 bits_src = llvm_int_bitsize(src_llvm)
@@ -4295,7 +4251,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(
                         f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr"
                     )
-                    asize_tmp = new_tmp()
                     cast_tmp = new_tmp()
                     out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
                     asize_tmp = new_tmp()
@@ -4341,7 +4296,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             )
         ptr_tmp = new_tmp()
         out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
-        asize_tmp = new_tmp()
         cast_tmp = new_tmp()
         out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
         asize_tmp = new_tmp()
@@ -4496,8 +4450,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"  br label %{end_lbl}")
         out.append(f"{end_lbl}:")
 def gen_func(fn: Func) -> List[str]:
-    ssa_value_types.clear()
-    unresolved_monos.clear()
     if fn.type_params:
         return []
     if fn.ret_type == "#":
@@ -5184,21 +5136,6 @@ def check_types(prog: Program):
         env.declare(ename, ename)
         if not has_payload:
             type_map[ename] = type_map.get("int", "i64")
-    for sdef in prog.structs:
-        struct_field_map[sdef.name] = [(fld.name, fld.typ) for fld in sdef.fields]
-    for struct_name in struct_defs:
-        env.declare(struct_name, struct_name)
-    for ename, edef in enum_defs.items():
-        variants = []
-        has_payload = False
-        for v in edef.variants:
-            variants.append((v.name, v.typ))
-            if getattr(v, "typ", None) is not None:
-                has_payload = True
-        enum_variant_map[ename] = variants
-        env.declare(ename, ename)
-        if not has_payload:
-            type_map[ename] = type_map.get("int", "i64")
     for ename, edef in enum_defs.items():
         for v in edef.variants:
             variant_map.setdefault(v.name, []).append((ename, v.typ))
@@ -5345,9 +5282,8 @@ def check_types(prog: Program):
             _inc_read(expr.name, node_desc=f"Var@{getattr(expr, 'lineno', '?')}")
             return typ
         if isinstance(expr, TypeofExpr):
-            inner_type = check_expr(expr.expr)
-            if expr.kind == "typeof":
-                return "string"
+            check_expr(expr.expr)
+            return "string"
         if isinstance(expr, Ternary):
             cond_type = check_expr(expr.cond)
             if cond_type != "bool":
@@ -5640,54 +5576,23 @@ def check_types(prog: Program):
                         for (ename, payload) in candidates
                         if ename == qualified_enum
                     ]
-                if expected is not None:
+                if len(candidates) > 1:
+                    msg_lines = []
+                    msg_lines.append(f"ambiguous enum variant '{variant_name}'")
+                    msg_lines.append("")
+                    msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
                     for ename, payload in candidates:
-                        if ename == expected:
-                            chosen = (ename, payload)
-                            break
-                if chosen is None:
-                    if len(arg_types) == 0:
-                        for ename, payload in candidates:
-                            if payload is None:
-                                chosen = (ename, payload)
-                                break
-                    elif len(arg_types) == 1:
-                        arg_t = arg_types[0]
-                        for ename, payload in candidates:
-                            if payload == arg_t:
-                                chosen = (ename, payload)
-                                break
-                        if chosen is None:
-                            unify_matches = []
-                            for ename, payload in candidates:
-                                if payload is None:
-                                    continue
-                                if (
-                                    unify_types(payload, arg_t) is not None
-                                    or unify_types(arg_t, payload) is not None
-                                ):
-                                    unify_matches.append((ename, payload))
-                            if len(unify_matches) == 1:
-                                chosen = unify_matches[0]
-                if chosen is None:
-                    if len(candidates) == 1:
-                        chosen = candidates[0]
-                    else:
-                        msg_lines = []
-                        msg_lines.append(f"ambiguous enum variant '{variant_name}'")
-                        msg_lines.append("")
-                        msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
-                        for ename, payload in candidates:
-                            payload_desc = "no payload" if payload is None else f"payload={payload}"
-                            msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
-                        msg_lines.append("")
-                        msg_lines.append("To fix, say which one you want to use, or take the other out of scope:")
-                        msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}::{variant_name}(...)")
-                        bhumi_report_error(
-                            getattr(expr, "lineno", None),
-                            getattr(expr, "col", None),
-                            "\n".join(msg_lines),
-                        )
+                        payload_desc = "no payload" if payload is None else f"payload={payload}"
+                        msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
+                    msg_lines.append("")
+                    msg_lines.append("To fix, qualify the variant with its enum name:")
+                    msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}::{variant_name}(...)")
+                    bhumi_report_error(
+                        getattr(expr, "lineno", None),
+                        getattr(expr, "col", None),
+                        "\n".join(msg_lines),
+                    )
+                chosen = candidates[0]
                 enum_name, payload = chosen
                 _orig_edef = globals().get("original_enum_defs", {}).get(enum_name)
                 _type_params = getattr(_orig_edef, "type_params", []) if _orig_edef else []
@@ -6612,7 +6517,6 @@ def check_types(prog: Program):
                 f"[Crawl-Checker]-[WARN]: unused write crumbs on '{name}': {wmax - wc} left. [This is not an error but a security warning!]"
             )
         crumb_map.clear()
-current_async_promoted = None
 class AsyncStateMachine:
     def __init__(self, func: Func, codegen):
         self.func = func
