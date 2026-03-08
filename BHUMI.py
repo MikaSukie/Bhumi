@@ -16,7 +16,9 @@ def _bhumi_get_source_lines():
             return f.read().splitlines()
     except Exception:
         return []
-def _visual_col(line: str, col: int, tabsize: int = 4) -> int:
+def _visual_col(
+    line: str, col: int, tabsize: int = 4
+) -> int:
     if col <= 1:
         return 0
     visual = 0
@@ -3255,16 +3257,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     msg_lines.append(f"ambiguous enum variant '{variant_name}'")
                     msg_lines.append("")
                     msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
-                    for ename, idx, payload in candidates:
+                    for ename, payload in candidates:
                         payload_desc = "no payload" if payload is None else f"payload={payload}"
                         msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
                     msg_lines.append("")
-                    msg_lines.append("To fix, use a namespaced (qualified) variant or add a type annotation so the compiler can disambiguate:")
-                    msg_lines.append(f"  - Qualify the variant:  {candidates[0][0]}::{variant_name}(...)  // e.g. Option::Some(42)")
-                    msg_lines.append("  - Add an explicit type for the target/scrutinee so the compiler knows which enum you mean.")
-                    msg_lines.append("  - Modify imports to bring only one variant into scope under a distinct name.")
-                    msg = "\n".join(msg_lines)
-                    bhumi_report_error(use_site_line, use_site_col, msg)
+                    msg_lines.append("To fix, say which one you want to use, or take the other out of scope:")
+                    msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}::{variant_name}(...)")
+                    bhumi_report_error(use_site_line, use_site_col, "\n".join(msg_lines))
                 if chosen is not None:
                     found_enum, found_variant_idx, found_variant_payload = chosen
         if found_enum is not None:
@@ -5789,8 +5788,8 @@ def check_types(prog: Program):
                             payload_desc = "no payload" if payload is None else f"payload={payload}"
                             msg_lines.append(f"  - {ename}::{variant_name}  ({payload_desc})")
                         msg_lines.append("")
-                        msg_lines.append("To fix, qualify the variant or add a type annotation:")
-                        msg_lines.append(f"  - Qualify the variant:  {candidates[0][0]}::{variant_name}(...)")
+                        msg_lines.append("To fix, say which one you want to use, or take the other out of scope:")
+                        msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}::{variant_name}(...)")
                         bhumi_report_error(
                             getattr(expr, "lineno", None),
                             getattr(expr, "col", None),
@@ -7270,3 +7269,4 @@ def main():
         f.write(llvm)
 if __name__ == "__main__":
     main()
+    
