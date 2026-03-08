@@ -1,0 +1,9 @@
+enum Toggle {
+    On;
+    Off;
+}
+
+fn main() <void> {
+    bool x = true;
+    Toggle t = x ? Toggle:On : Toggle:Off;
+}
