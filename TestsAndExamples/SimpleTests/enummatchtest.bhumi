@@ -13,7 +13,7 @@ enum Option<T> {
 
 pub fn safe_div_direct(int a, int b) <Respond<int, string>> {
     
-    Option<int> x = Option:Some(42);
+    Option<int> x = Option->Some(42);
     
     printnl(typeof(x));
     if (b == 0) {
