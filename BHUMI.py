@@ -14,7 +14,7 @@ def _bhumi_get_source_lines():
     try:
         with open(compiled, encoding="utf-8", errors="ignore") as f:
             return f.read().splitlines()
-    except Exception:
+    except OSError:
         return []
 def _visual_col(
     line: str, col: int, tabsize: int = 4
@@ -58,6 +58,10 @@ def llvm_to_lang(llvm_t: str) -> str:
         return llvm_t[len("%struct.") : -1] + "*"
     if llvm_t.startswith("%struct.") and not llvm_t.endswith("*"):
         return llvm_t[len("%struct.") :]
+    if llvm_t.startswith("%enum.") and llvm_t.endswith("*"):
+        return llvm_t[len("%enum.") : -1] + "*"
+    if llvm_t.startswith("%enum.") and not llvm_t.endswith("*"):
+        return llvm_t[len("%enum.") :]
     if m := re.fullmatch(r"i(\d+)", llvm_t):
         bits = int(m.group(1))
         return "int" if bits == 64 else f"int{bits}"
@@ -69,6 +73,8 @@ def llvm_to_lang(llvm_t: str) -> str:
         base = llvm_t.rstrip("*")
         if base.startswith("%struct."):
             return base[len("%struct.") :] + "*"
+        if base.startswith("%enum."):
+            return base[len("%enum.") :] + "*"
         return "void*"
     return llvm_t
 TYPE_TOKENS = {
@@ -292,12 +298,12 @@ def llvm_ty_of(typ: str) -> str:
         if type_map[typ] == "void":
             return "void"
         return type_map[typ]
-    _fixed_arr_m = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[(\d+)\]", typ)
+    _fixed_arr_m = re.fullmatch(r"([A-Za-z_]\w*\**)\[(\d+)]", typ)
     if _fixed_arr_m:
         elem_base, count = _fixed_arr_m.group(1), _fixed_arr_m.group(2)
         elem_llvm = llvm_ty_of(elem_base)
         return f"[{count} x {elem_llvm}]*"
-    _unsized_arr_m = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[\]", typ)
+    _unsized_arr_m = re.fullmatch(r"([A-Za-z_]\w*\**)\[]", typ)
     if _unsized_arr_m:
         elem_base = _unsized_arr_m.group(1)
         elem_llvm = llvm_ty_of(elem_base)
@@ -389,6 +395,22 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
     for v in template.variants:
         payload = _subst_t(v.typ)
         new_variants.append((v.name, payload))
+    unresolved = [
+        (vname, payload)
+        for vname, payload in new_variants
+        if payload is not None and any(
+            re.search(r'\b' + re.escape(tp) + r'\b', payload)
+            for tp in template.type_params
+        )
+    ]
+    if unresolved:
+        bad = ", ".join(f"{vn}:{p}" for vn, p in unresolved)
+        bhumi_report_error(
+            None, None,
+            f"Enum '{base_name}' monomorphisation with {actual_types} left unresolved "
+            f"type parameters in variants: {bad}. "
+            f"Make sure all type arguments are concrete types, not type-param names."
+        )
     enum_variant_map[mononame] = new_variants
     if base_name in type_map:
         type_map[mononame] = type_map[base_name]
@@ -571,32 +593,24 @@ def ensure_monomorph_call(
             new_cases = []
             for case in s.cases:
                 new_body0 = transform_stmt_list(case.body)
-                new_cases.append(MatchCase(case.variant, case.binding, new_body0))
+                new_cases.append(MatchCase(
+                    case.variant, case.binding, new_body0,
+                    nested_pattern=case.nested_pattern
+                ))
             return Match(new_expr0, new_cases)
         if isinstance(s, TypeSwitch):
             subj = s.subject
             actual = subst_map.get(subj)
-            def transform_body(body_list):
-                out_stmts = []
-                for ss in body_list or []:
-                    r = replace_in_stmt(ss)
-                    if r is None:
-                        continue
-                    if isinstance(r, list):
-                        out_stmts.extend(r)
-                    else:
-                        out_stmts.append(r)
-                return out_stmts
             if actual is None:
                 new_cases = []
                 for case in s.cases:
-                    new_body = transform_body(case.body)
+                    new_body = transform_stmt_list(case.body)
                     new_cases.append(
                         TypeSwitchCase(_subst_type(case.typ, subst_map), new_body)
                     )
                 new_fb = None
                 if s.fallback:
-                    new_fb = transform_body(s.fallback)
+                    new_fb = transform_stmt_list(s.fallback)
                 return TypeSwitch(subj, new_cases, new_fb)
             processed_cases = []
             for case in s.cases:
@@ -604,16 +618,16 @@ def ensure_monomorph_call(
                 processed_cases.append((ct, case.body))
             for ct, body in processed_cases:
                 if ct == actual:
-                    return transform_body(body)
+                    return transform_stmt_list(body)
             if actual == "int":
                 for ct, body in processed_cases:
                     if isinstance(ct, str) and ct.startswith("int"):
-                        return transform_body(body)
+                        return transform_stmt_list(body)
             for ct, body in processed_cases:
                 if unify_types(ct, actual) is not None:
-                    return transform_body(body)
+                    return transform_stmt_list(body)
             if s.fallback is not None:
-                return transform_body(s.fallback)
+                return transform_stmt_list(s.fallback)
             return []
         return s
     new_params = [(_subst_type(p[0], subst_map), p[1]) for p in base_fn.params]
@@ -719,8 +733,6 @@ def mangle_type(typ: str) -> str:
     while "__" in t:
         t = t.replace("__", "_")
     return t.strip("_")
-def clean_struct_name(name: str) -> str:
-    return name.rstrip("*").removeprefix("%struct.")
 def llvm_int_bitsize(ty: str) -> Optional[int]:
     if m := re.fullmatch(r"i(\d+)", ty):
         return int(m.group(1))
@@ -804,6 +816,10 @@ def emit_cast_value(
     if src_llvm.startswith("i") and not src_llvm.endswith("*") and dst_llvm == "i1":
         tmp = new_tmp()
         out.append(f"  {tmp} = icmp ne {src_llvm} {val}, 0")
+        return tmp
+    if src_llvm.endswith("*") and dst_llvm.endswith("*"):
+        tmp = new_tmp()
+        out.append(f"  {tmp} = bitcast {src_llvm} {val} to {dst_llvm}")
         return tmp
     return val
 def is_unsigned_int_type(typ: str) -> bool:
@@ -1098,6 +1114,7 @@ class MatchCase:
     variant: str
     binding: Optional[str]
     body: List[Stmt]
+    nested_pattern: Optional["MatchCase"] = None
 @dataclass
 class Match(Stmt):
     expr: Expr
@@ -1334,6 +1351,18 @@ class Parser:
                 funcs.append(self.parse_func())
         self.program = Program(funcs, imports, structs, enums, globals)
         return self.program
+    def _expect_gt(self):
+        if self.peek().kind == "GT":
+            return self.bump()
+        if self.peek().kind == "RSHIFT":
+            tok = self.tokens[self.pos]
+            self.tokens[self.pos] = Token("GT", ">", tok.line, tok.col + 1)
+            return Token("GT", ">", tok.line, tok.col)
+        bhumi_report_error(
+            self.peek().line,
+            self.peek().col,
+            f"Expected '>' to close generic type parameters, got {self.peek().kind}",
+        )
     def parse_type(self) -> str:
         prefix_amp = False
         if self.peek().kind == "AMP":
@@ -1350,7 +1379,7 @@ class Parser:
                 params.append(self.parse_type())
                 if not self.match("COMMA"):
                     break
-            self.expect("GT")
+            self._expect_gt()
             base = f"{base}<" + ",".join(params) + ">"
         if prefix_amp or self.match("AMP"):
             base += "*"
@@ -1807,34 +1836,65 @@ class Parser:
         self.expect("LBRACE")
         cases: List[MatchCase] = []
         while self.peek().kind != "RBRACE":
-            v_tok = self.expect("IDENT")
-            variant_name = v_tok.value
-            if "__mono__" in variant_name:
-                bhumi_report_error(
-                    v_tok.line,
-                    v_tok.col,
-                    "Match variant names cannot contain '__mono__'.",
-                )
-            binding_name: Optional[str] = None
-            if self.match("LPAREN"):
-                b_tok = self.expect("IDENT")
-                binding_name = b_tok.value
-                if "__mono__" in binding_name:
-                    bhumi_report_error(
-                        b_tok.line,
-                        b_tok.col,
-                        "Binding names cannot contain '__mono__'.",
-                    )
-                self.expect("RPAREN")
+            case = self._parse_match_case()
             self.expect("COLON")
             self.expect("LBRACE")
             body_stmts: List[Stmt] = []
             while self.peek().kind != "RBRACE":
                 body_stmts.append(self.parse_stmt())
             self.expect("RBRACE")
-            cases.append(MatchCase(variant_name, binding_name, body_stmts))
+            case.body = body_stmts
+            cases.append(case)
         self.expect("RBRACE")
         return Match(expr_to_match, cases)
+    def _parse_match_case(self) -> "MatchCase":
+        v_tok = self.expect("IDENT")
+        variant_name = v_tok.value
+        if "__mono__" in variant_name:
+            bhumi_report_error(
+                v_tok.line, v_tok.col,
+                "Match variant names cannot contain '__mono__'.",
+            )
+        binding_name: Optional[str] = None
+        nested_pattern: Optional[MatchCase] = None
+        if self.match("LPAREN"):
+            inner_tok = self.expect("IDENT")
+            inner_name = inner_tok.value
+            if "__mono__" in inner_name:
+                bhumi_report_error(
+                    inner_tok.line, inner_tok.col,
+                    "Binding names cannot contain '__mono__'.",
+                )
+            if self.peek().kind == "LPAREN":
+                self.bump()
+                inner_case = self._parse_match_case_inner(inner_name)
+                self.expect("RPAREN")
+                nested_pattern = inner_case
+                binding_name = None
+            elif self.peek().kind == "RPAREN":
+                binding_name = inner_name
+                self.expect("RPAREN")
+            else:
+                bhumi_report_error(
+                    inner_tok.line, inner_tok.col,
+                    f"Expected ')' or nested pattern after '{inner_name}' in match arm",
+                )
+        return MatchCase(variant=variant_name, binding=binding_name, body=[], nested_pattern=nested_pattern)
+    def _parse_match_case_inner(self, variant_name: str) -> "MatchCase":
+        if "__mono__" in variant_name:
+            bhumi_report_error(None, None, "Match variant names cannot contain '__mono__'.")
+        binding_name: Optional[str] = None
+        nested_pattern: Optional[MatchCase] = None
+        inner_tok = self.expect("IDENT")
+        inner_name = inner_tok.value
+        if self.peek().kind == "LPAREN":
+            self.bump()
+            deeper = self._parse_match_case_inner(inner_name)
+            self.expect("RPAREN")
+            nested_pattern = deeper
+        else:
+            binding_name = inner_name
+        return MatchCase(variant=variant_name, binding=binding_name, body=[], nested_pattern=nested_pattern)
     def parse_var_decl(self) -> VarDecl:
         access = "priv"
         nomd = False
@@ -3181,35 +3241,108 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             template = globals().get("original_enum_defs", {}).get(found_enum)
             if template and template.type_params:
                 actuals: List[str] = []
+                def _normalize_expected(exp_str):
+                    if exp_str is None:
+                        return None
+                    s = exp_str.strip()
+                    s = s.rstrip("*")
+                    if s.startswith("%enum."):
+                        s = s[len("%enum."):]
+                    elif s.startswith("%struct."):
+                        s = s[len("%struct."):]
+                    return s
+                def _actuals_from_expected(exp_str, base_enum, tparams):
+                    if exp_str is None:
+                        return None
+                    bare = _normalize_expected(exp_str)
+                    if bare is None:
+                        return None
+                    generic_m = re.fullmatch(re.escape(base_enum) + r"<(.+)>", bare)
+                    if generic_m:
+                        raw = generic_m.group(1)
+                        parts = [p.strip() for p in raw.split(",")]
+                        if len(parts) == len(tparams):
+                            return parts
+                    mono_prefix = base_enum + "__mono__"
+                    if bare.startswith(mono_prefix) and bare in enum_variant_map:
+                        concrete_variants = enum_variant_map[bare]
+                        orig_variants = template.variants
+                        result: List[Optional[str]] = [None] * len(tparams)
+                        for orig_v, concrete_pair in zip(orig_variants, concrete_variants):
+                            conc_payload = concrete_pair[1]
+                            orig_payload_type = orig_v.typ
+                            if orig_payload_type is not None and conc_payload is not None:
+                                for i, tp in enumerate(tparams):
+                                    if orig_payload_type == tp:
+                                        result[i] = conc_payload
+                        if all(r is not None for r in result):
+                            return result
+                    return None
                 if found_variant_payload is not None and isinstance(found_variant_payload, str):
                     if len(template.type_params) == 1:
                         if not arg_types:
                             bhumi_report_error(None, None, f"Cannot infer type parameter for enum {found_enum}; no args provided")
                         actuals = [arg_types[0]]
                     else:
-                        for tp in template.type_params:
-                            if found_variant_payload == tp:
-                                if not arg_types:
-                                    bhumi_report_error(None, None, f"Cannot infer type parameter '{tp}' for enum {found_enum}; no args provided")
-                                actuals.append(arg_types[0])
-                            else:
-                                actuals.append(tp)
+                        actuals_from_exp = _actuals_from_expected(expected, found_enum, template.type_params)
+                        if actuals_from_exp is not None:
+                            actuals = actuals_from_exp
+                        else:
+                            for tp in template.type_params:
+                                if found_variant_payload == tp:
+                                    if not arg_types:
+                                        bhumi_report_error(None, None, f"Cannot infer type parameter '{tp}' for enum {found_enum}; no args provided")
+                                    actuals.append(arg_types[0])
+                                else:
+                                    actuals.append(tp)
                 else:
-                    if expected is not None:
-                        m = re.match(r"(.+)__mono__.+", expected)
-                        if m:
-                            pass
-                if all(isinstance(a, str) and not re.fullmatch(r"[A-Z]\w*", a) for a in actuals):
+                    actuals_from_exp = _actuals_from_expected(expected, found_enum, template.type_params)
+                    if actuals_from_exp is not None:
+                        actuals = actuals_from_exp
+                if actuals and all(isinstance(a, str) and not re.fullmatch(r"[A-Z]\w*", a) for a in actuals):
                     mononame = ensure_monomorph_for_enum(found_enum, actuals)
                     variants = enum_variant_map.get(mononame)
                     if variants:
                         _, payload = variants[found_variant_idx]
                         found_enum = mononame
                         found_variant_payload = payload
-                    else:
-                        pass
-                else:
-                    pass
+                elif actuals and expected is not None:
+                    actuals_from_exp = _actuals_from_expected(expected, found_enum, template.type_params)
+                    if actuals_from_exp is not None:
+                        mononame = ensure_monomorph_for_enum(found_enum, actuals_from_exp)
+                        variants = enum_variant_map.get(mononame)
+                        if variants:
+                            _, payload = variants[found_variant_idx]
+                            found_enum = mononame
+                            found_variant_payload = payload
+                if (
+                    found_variant_payload is not None
+                    and isinstance(found_variant_payload, str)
+                    and re.fullmatch(r"[A-Z]\w*", found_variant_payload)
+                    and found_variant_payload in template.type_params
+                ):
+                    _partial = {found_variant_payload: arg_types[0]} if arg_types else {}
+                    _actuals_exp = _actuals_from_expected(expected, found_enum, template.type_params)
+                    _final_actuals = []
+                    for _tp in template.type_params:
+                        if _tp in _partial:
+                            _final_actuals.append(_partial[_tp])
+                        elif _actuals_exp is not None:
+                            _idx = template.type_params.index(_tp)
+                            _final_actuals.append(_actuals_exp[_idx])
+                        else:
+                            _final_actuals = []
+                            break
+                    if _final_actuals and all(
+                        isinstance(a, str) and not re.fullmatch(r"[A-Z]\w*", a)
+                        for a in _final_actuals
+                    ):
+                        mononame = ensure_monomorph_for_enum(found_enum, _final_actuals)
+                        variants = enum_variant_map.get(mononame)
+                        if variants:
+                            _, payload = variants[found_variant_idx]
+                            found_enum = mononame
+                            found_variant_payload = payload
         if found_enum is not None:
             llvm_enum_ty = type_map.get(found_enum, type_map.get("int", "i64"))
             if found_variant_payload is None:
@@ -3253,6 +3386,15 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     )
                 payload_val = arg_vals[0]
                 payload_ty = found_variant_payload
+                if (
+                    isinstance(payload_ty, str)
+                    and re.fullmatch(r"[A-Z]\w*", payload_ty)
+                    and payload_ty not in type_map
+                    and payload_ty not in enum_variant_map
+                ):
+                    inferred = infer_type(expr.args[0])
+                    if inferred and inferred != payload_ty:
+                        payload_ty = inferred
                 llvm_payload_ty = llvm_ty_of(payload_ty)
                 szptr = new_tmp()
                 out.append(
@@ -3269,9 +3411,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     f"  {tag_ptr} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* {struct_ptr}, i32 0, i32 0"
                 )
                 out.append(f"  store i32 {found_variant_idx}, i32* {tag_ptr}")
+                payload_ptr_raw = new_tmp()
+                out.append(
+                    f"  {payload_ptr_raw} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* {struct_ptr}, i32 0, i32 1"
+                )
                 payload_ptr = new_tmp()
                 out.append(
-                    f"  {payload_ptr} = getelementptr inbounds %enum.{found_enum}, %enum.{found_enum}* {struct_ptr}, i32 0, i32 1"
+                    f"  {payload_ptr} = bitcast [8 x i8]* {payload_ptr_raw} to {llvm_payload_ty}*"
                 )
                 out.append(
                     f"  store {llvm_payload_ty} {payload_val}, {llvm_payload_ty}* {payload_ptr}"
@@ -3770,10 +3916,26 @@ def infer_type(expr: Expr) -> str:
             ename, payload, has_tparams = _chosen
             _orig_edef = globals().get("original_enum_defs", {}).get(ename)
             _tparams = getattr(_orig_edef, "type_params", []) if _orig_edef else []
-            if _tparams and payload in _tparams and expr.args:
-                _actual_t = infer_type(expr.args[0])
-                _mono = ensure_monomorph_for_enum(ename, [_actual_t])
-                return _mono + "*"
+            if _tparams and payload is not None and payload in _tparams and expr.args:
+                if len(_tparams) == 1:
+                    _actual_t = infer_type(expr.args[0])
+                    _mono = ensure_monomorph_for_enum(ename, [_actual_t])
+                    return _mono + "*"
+                else:
+                    _orig_edef2 = globals().get("original_enum_defs", {}).get(ename)
+                    _tparams2 = getattr(_orig_edef2, "type_params", []) if _orig_edef2 else []
+                    if _orig_edef2 and _tparams2 and expr.args:
+                        _arg_types2 = [infer_type(a) for a in expr.args]
+                        _actuals2: List[Optional[str]] = [None] * len(_tparams2)
+                        for _vi, _vv in enumerate(_orig_edef2.variants):
+                            if _vv.name == _infer_variant_name and _vv.typ is not None:
+                                for _pi, _tp2 in enumerate(_tparams2):
+                                    if _vv.typ == _tp2 and len(_arg_types2) > 0:
+                                        _actuals2[_pi] = _arg_types2[0]
+                        if all(a is not None for a in _actuals2):
+                            _mono2 = ensure_monomorph_for_enum(ename, _actuals2)
+                            return _mono2 + "*"
+                    return ename + "*"
             if type_map.get(ename, "").startswith("i") and payload is None:
                 return ename
             return ename + "*"
@@ -3904,6 +4066,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 )
             return
         llvm_ty = llvm_ty_of(stmt.typ)
+        _check_no_bare_generic(
+            stmt.typ,
+            f"Variable declaration '{stmt.name}'",
+            getattr(stmt, "lineno", None), getattr(stmt, "col", None)
+        )
         if stmt.name not in symbol_table.scopes[-1]:
             out.append(f"  %{ir_name}_addr = alloca {llvm_ty}")
             if llvm_ty.endswith("*"):
@@ -4295,10 +4462,24 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         if val:
             src_lang = infer_type(stmt.expr)
             dst_lang = llvm_to_lang(ret_ty)
-            cast_tmp = emit_cast_value(val, src_lang, dst_lang, out)
-            if cast_tmp is None:
-                cast_tmp = val
-            out.append(f"  ret {ret_ty} {cast_tmp}")
+            src_llvm_check = llvm_ty_of(src_lang) if src_lang else ret_ty
+            if (
+                src_llvm_check != ret_ty
+                and src_llvm_check.endswith("*")
+                and ret_ty.endswith("*")
+                and src_llvm_check.startswith("%struct.")
+                and (ret_ty.startswith("%enum.") or ret_ty.startswith("%struct."))
+            ):
+                if src_llvm_check != ret_ty:
+                    bt = new_tmp()
+                    out.append(f"  {bt} = bitcast {src_llvm_check} {val} to {ret_ty}")
+                    val = bt
+                out.append(f"  ret {ret_ty} {val}")
+            else:
+                cast_tmp = emit_cast_value(val, src_lang, dst_lang, out)
+                if cast_tmp is None:
+                    cast_tmp = val
+                out.append(f"  ret {ret_ty} {cast_tmp}")
         else:
             out.append(f"  ret void")
     elif isinstance(stmt, ExprStmt):
@@ -4335,6 +4516,17 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         out.append(f"{skip_lbl}:")
     elif isinstance(stmt, Match):
         raw_ty = infer_type(stmt.expr)
+        if isinstance(stmt.expr, Var):
+            _sym = symbol_table.lookup(stmt.expr.name)
+            if _sym is not None:
+                _sym_llvm_ty = _sym[0]  # e.g. "%enum.Respond__mono__int_string*"
+                _sym_base = _sym_llvm_ty.rstrip("*")
+                if _sym_base.startswith("%enum."):
+                    raw_ty = _sym_base[len("%enum."):] + "*"
+                elif _sym_base.startswith("%struct."):
+                    _candidate = _sym_base[len("%struct."):]
+                    if _candidate in enum_variant_map:
+                        raw_ty = _candidate + "*"
         enum_name = None
         base = raw_ty
         while base.endswith("*"):
@@ -4347,7 +4539,29 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 enum_name = nm
         elif base in enum_variant_map:
             enum_name = base
-        else:
+        if enum_name is not None:
+            _orig_edef = globals().get("original_enum_defs", {}).get(enum_name)
+            if _orig_edef and getattr(_orig_edef, "type_params", []):
+                for _ename, _variants in enum_variant_map.items():
+                    if "__mono__" not in _ename:
+                        continue
+                    if not _ename.startswith(enum_name + "__mono__"):
+                        continue
+                    _tparams = set(getattr(_orig_edef, "type_params", []))
+                    if all(
+                        p is None or p not in _tparams
+                        for _, p in _variants
+                    ):
+                        enum_name = _ename
+                        break
+        if enum_name is None:
+            if isinstance(stmt.expr, Var):
+                _sym2 = symbol_table.lookup(stmt.expr.name)
+                if _sym2 is not None:
+                    _llvm2 = _sym2[0].rstrip("*")
+                    if _llvm2.startswith("%enum."):
+                        enum_name = _llvm2[len("%enum."):]
+        if enum_name is None:
             raw_llvm = type_map.get(raw_ty, raw_ty)
             candidates = [
                 high
@@ -4420,6 +4634,99 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         for idx, (vname, _) in enumerate(enum_variant_map[enum_name]):
             out.append(f"	i32 {idx}, label %{variant_labels[vname]}")
         out.append("  ]")
+        def gen_nested_match_case(case, outer_enum_name, outer_enum_ptr, outer_payload_val, outer_payload_type, arm_end_lbl, out, ret_ty):
+            if case.nested_pattern is None:
+                if outer_payload_val is not None and case.binding is not None:
+                    llvm_payload_ty = llvm_ty_of(outer_payload_type)
+                    out.append(f"  %{case.binding}_addr = alloca {llvm_payload_ty}")
+                    out.append(
+                        f"  store {llvm_payload_ty} {outer_payload_val}, {llvm_payload_ty}* %{case.binding}_addr"
+                    )
+                    symbol_table.declare(case.binding, llvm_payload_ty, case.binding)
+                for s in case.body:
+                    gen_stmt(s, out, ret_ty)
+                last = out[-1].strip() if out else ""
+                if not (last.startswith("ret") or last == "unreachable" or last.startswith("br ")):
+                    out.append(f"  br label %{arm_end_lbl}")
+            else:
+                inner_case = case.nested_pattern
+                inner_enum_name = outer_payload_type
+                if inner_enum_name.endswith("*"):
+                    inner_enum_name = inner_enum_name[:-1]
+                if inner_enum_name.startswith("%enum."):
+                    inner_enum_name = inner_enum_name[len("%enum."):]
+                elif inner_enum_name.startswith("%struct."):
+                    inner_enum_name = inner_enum_name[len("%struct."):]
+                if inner_enum_name not in enum_variant_map:
+                    bhumi_report_error(
+                        None, None,
+                        f"Nested match: type '{inner_enum_name}' is not a known enum. "
+                        f"Only enum types can be nested in match patterns."
+                    )
+                inner_enum_ptr = outer_payload_val
+                inner_tag_ptr = new_tmp()
+                out.append(
+                    f"  {inner_tag_ptr} = getelementptr inbounds %enum.{inner_enum_name}, "
+                    f"%enum.{inner_enum_name}* {inner_enum_ptr}, i32 0, i32 0"
+                )
+                inner_tag = new_tmp()
+                out.append(f"  {inner_tag} = load i32, i32* {inner_tag_ptr}")
+                inner_end_lbl = new_label("nested_match_end")
+                inner_labels = {
+                    vname: new_label(f"nested_case_{vname}")
+                    for vname, _ in enum_variant_map[inner_enum_name]
+                }
+                inner_variant_info = next(
+                    (v for v in enum_variant_map[inner_enum_name] if v[0] == inner_case.variant), None
+                )
+                if inner_variant_info is None:
+                    bhumi_report_error(
+                        None, None,
+                        f"Nested match: unknown variant '{inner_case.variant}' "
+                        f"for inner enum '{inner_enum_name}'"
+                    )
+                out.append(f"  switch i32 {inner_tag}, label %{inner_end_lbl} [")
+                for idx2, (vname2, _) in enumerate(enum_variant_map[inner_enum_name]):
+                    lbl2 = inner_labels[vname2]
+                    out.append(f"	i32 {idx2}, label %{lbl2}")
+                out.append("  ]")
+                for vname2, vpayload2 in enum_variant_map[inner_enum_name]:
+                    lbl2 = inner_labels[vname2]
+                    out.append(f"{lbl2}:")
+                    if vname2 != inner_case.variant:
+                        out.append(f"  br label %{inner_end_lbl}")
+                        continue
+                    next_payload_val = None
+                    next_payload_type = None
+                    if vpayload2 is not None:
+                        inner_payload_raw = new_tmp()
+                        out.append(
+                            f"  {inner_payload_raw} = getelementptr inbounds "
+                            f"%enum.{inner_enum_name}, %enum.{inner_enum_name}* "
+                            f"{inner_enum_ptr}, i32 0, i32 1"
+                        )
+                        inner_llvm_payload_ty = llvm_ty_of(vpayload2)
+                        inner_payload_cast = new_tmp()
+                        out.append(
+                            f"  {inner_payload_cast} = bitcast [8 x i8]* {inner_payload_raw} "
+                            f"to {inner_llvm_payload_ty}*"
+                        )
+                        inner_loaded = new_tmp()
+                        out.append(
+                            f"  {inner_loaded} = load {inner_llvm_payload_ty}, "
+                            f"{inner_llvm_payload_ty}* {inner_payload_cast}"
+                        )
+                        next_payload_val = inner_loaded
+                        next_payload_type = vpayload2
+                    gen_nested_match_case(
+                        inner_case, inner_enum_name, inner_enum_ptr,
+                        next_payload_val, next_payload_type,
+                        arm_end_lbl, out, ret_ty
+                    )
+                out.append(f"{inner_end_lbl}:")
+                last = out[-1].strip() if out else ""
+                if not (last.startswith("ret") or last == "unreachable" or last.startswith("br ")):
+                    out.append(f"  br label %{arm_end_lbl}")
         for case in stmt.cases:
             lbl = variant_labels.get(case.variant)
             if not lbl:
@@ -4439,33 +4746,98 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     f"Unknown variant {case.variant} for enum {enum_name}",
                 )
             payload_type = variant_info[1]
+            if (
+                payload_type is not None
+                and isinstance(payload_type, str)
+                and re.fullmatch(r"[A-Z]\w*", payload_type)
+                and payload_type not in type_map
+                and payload_type not in enum_variant_map
+            ):
+                _orig_edef = globals().get("original_enum_defs", {}).get(
+                    enum_name.split("__mono__")[0] if "__mono__" in enum_name else enum_name
+                )
+                _tparams = set(getattr(_orig_edef, "type_params", [])) if _orig_edef else set()
+                _tp_idx = list(_tparams).index(payload_type) if payload_type in _tparams else None
+                _resolved = None
+                if _tp_idx is not None and "__mono__" in enum_name:
+                    _suffix = enum_name.split("__mono__", 1)[1]
+                    _parts = _suffix.split("_")
+                    if _tp_idx < len(_parts):
+                        _resolved = _parts[_tp_idx]
+                if _resolved is None:
+                    if isinstance(stmt.expr, Var):
+                        _sym3 = symbol_table.lookup(stmt.expr.name)
+                        if _sym3 is not None:
+                            _sym_llvm = _sym3[0].rstrip("*")
+                            if _sym_llvm.startswith("%enum."):
+                                _mono = _sym_llvm[len("%enum."):]
+                                _concrete_variants = enum_variant_map.get(_mono)
+                                if _concrete_variants:
+                                    for _vn, _vp in _concrete_variants:
+                                        if _vn == case.variant and _vp is not None:
+                                            _resolved = _vp
+                                            break
+                if _resolved and not re.fullmatch(r"[A-Z]\w*", _resolved):
+                    payload_type = _resolved
+            loaded_payload = None
             if payload_type is not None:
-                payload_ptr = new_tmp()
+                payload_ptr_raw = new_tmp()
                 out.append(
-                    f"  {payload_ptr} = getelementptr inbounds %enum.{enum_name}, %enum.{enum_name}* {enum_ptr}, i32 0, i32 1"
+                    f"  {payload_ptr_raw} = getelementptr inbounds %enum.{enum_name}, %enum.{enum_name}* {enum_ptr}, i32 0, i32 1"
+                )
+                llvm_payload_ty = llvm_ty_of(payload_type)
+                payload_ptr_cast = new_tmp()
+                out.append(
+                    f"  {payload_ptr_cast} = bitcast [8 x i8]* {payload_ptr_raw} to {llvm_payload_ty}*"
                 )
                 loaded_payload = new_tmp()
-                llvm_payload_ty = llvm_ty_of(payload_type)
                 out.append(
-                    f"  {loaded_payload} = load {llvm_payload_ty}, {llvm_payload_ty}* {payload_ptr}"
+                    f"  {loaded_payload} = load {llvm_payload_ty}, {llvm_payload_ty}* {payload_ptr_cast}"
                 )
-                var_name = case.binding
-                if var_name is not None:
-                    out.append(f"  %{var_name}_addr = alloca {llvm_payload_ty}")
+                if case.nested_pattern is None and case.binding is not None:
+                    out.append(f"  %{case.binding}_addr = alloca {llvm_payload_ty}")
                     out.append(
-                        f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{var_name}_addr"
+                        f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{case.binding}_addr"
                     )
-                    symbol_table.declare(var_name, llvm_payload_ty, var_name)
-            for s in case.body:
-                gen_stmt(s, out, ret_ty)
-            last = out[-1].strip() if out else ""
-            if not (
-                last.startswith("ret")
-                or last == "unreachable"
-                or last.startswith("br ")
-            ):
-                out.append(f"  br label %{end_lbl}")
+                    symbol_table.declare(case.binding, llvm_payload_ty, case.binding)
+            if case.nested_pattern is not None:
+                gen_nested_match_case(
+                    case, enum_name, enum_ptr,
+                    loaded_payload, payload_type,
+                    end_lbl, out, ret_ty
+                )
+            else:
+                for s in case.body:
+                    gen_stmt(s, out, ret_ty)
+                last = out[-1].strip() if out else ""
+                if not (
+                    last.startswith("ret")
+                    or last == "unreachable"
+                    or last.startswith("br ")
+                ):
+                    out.append(f"  br label %{end_lbl}")
         out.append(f"{end_lbl}:")
+def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
+    orig = globals().get("original_enum_defs", {})
+    base = typ.rstrip("*")
+    if base.startswith("%enum."):
+        base = base[len("%enum."):]
+    elif base.startswith("%struct."):
+        base = base[len("%struct."):]
+    edef = orig.get(base)
+    if edef is None:
+        return
+    tparams = getattr(edef, "type_params", [])
+    if not tparams:
+        return
+    if "__mono__" not in base and "<" not in typ:
+        needed = ", ".join(tparams)
+        bhumi_report_error(
+            lineno, col,
+            f"{context}: '{base}' is a generic enum requiring type arguments "
+            f"<{needed}>, but was used without them. "
+            f"Did you mean '{base}<{needed}>'?"
+        )
 def gen_func(fn: Func) -> List[str]:
     if fn.type_params:
         return []
@@ -4512,13 +4884,24 @@ def gen_func(fn: Func) -> List[str]:
         out = [f"define i32 @main(i32 %argc, i8** %argv) {{", "entry:"]
         out.append("  store i8** %argv, i8*** @__argv_ptr")
     else:
+        _check_no_bare_generic(
+            fn.ret_type,
+            f"Return type of function '{fn.name}'",
+            getattr(fn, "lineno", None), getattr(fn, "col", None)
+        )
+        for _pty, _pname in fn.params:
+            _check_no_bare_generic(
+                _pty,
+                f"Parameter '{_pname}' of function '{fn.name}'",
+                getattr(fn, "lineno", None), getattr(fn, "col", None)
+            )
         ret_ty = llvm_ty_of(fn.ret_type)
         param_sig = ", ".join(f"{llvm_ty_of(t)} %{n}" for t, n in fn.params)
         out = [f"define {ret_ty} @{fn.name}({param_sig}) {{", "entry:"]
     for typ, name in fn.params:
         llvm_ty = llvm_ty_of(typ)
-        _fixed_arr = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[(\d+)\]", typ)
-        _unsized_arr = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[\]", typ)
+        _fixed_arr = re.fullmatch(r"([A-Za-z_]\w*\**)\[(\d+)]", typ)
+        _unsized_arr = re.fullmatch(r"([A-Za-z_]\w*\**)\[]", typ)
         if _fixed_arr:
             count = _fixed_arr.group(2)
             out.append(f"  %{name}_addr = alloca {llvm_ty}")
@@ -5611,6 +5994,26 @@ def check_types(prog: Program):
                         for (ename, payload) in candidates
                         if ename == qualified_enum
                     ]
+                mono_bases = {
+                    ename.split("__mono__")[0]
+                    for (ename, _) in candidates
+                    if "__mono__" in ename
+                }
+                if mono_bases:
+                    candidates = [
+                        (ename, payload)
+                        for (ename, payload) in candidates
+                        if "__mono__" in ename or ename not in mono_bases
+                    ]
+                if len(candidates) > 1 and expected is not None:
+                    exp_bare = expected.rstrip("*")
+                    preferred = [
+                        (ename, payload)
+                        for (ename, payload) in candidates
+                        if ename == exp_bare or exp_bare.startswith(ename)
+                    ]
+                    if len(preferred) == 1:
+                        candidates = preferred
                 if len(candidates) > 1:
                     msg_lines = []
                     msg_lines.append(f"ambiguous enum variant '{variant_name}'")
@@ -5648,8 +6051,36 @@ def check_types(prog: Program):
                         )
                     if _type_params and payload in _type_params:
                         actual_arg_t = arg_types[0]
-                        mono_name = ensure_monomorph_for_enum(enum_name, [actual_arg_t])
-                        return mono_name
+                        if len(_type_params) == 1:
+                            mono_name = ensure_monomorph_for_enum(enum_name, [actual_arg_t])
+                            return mono_name
+                        else:
+                            actuals_ce = None
+                            if expected is not None:
+                                exp_bare = expected.rstrip("*")
+                                gm_ce = re.fullmatch(re.escape(enum_name) + r"<(.+)>", exp_bare)
+                                if gm_ce:
+                                    parts_ce = [p.strip() for p in gm_ce.group(1).split(",")]
+                                    if len(parts_ce) == len(_type_params):
+                                        actuals_ce = parts_ce
+                                if actuals_ce is None:
+                                    mono_prefix_ce = enum_name + "__mono__"
+                                    if exp_bare.startswith(mono_prefix_ce) and exp_bare in enum_variant_map:
+                                        concrete_vlist = enum_variant_map[exp_bare]
+                                        orig_vlist = _orig_edef.variants
+                                        res_ce: List[Optional[str]] = [None] * len(_type_params)
+                                        for orig_v, conc_pair in zip(orig_vlist, concrete_vlist):
+                                            conc_p = conc_pair[1]
+                                            if orig_v.typ is not None and conc_p is not None:
+                                                for i, tp in enumerate(_type_params):
+                                                    if orig_v.typ == tp:
+                                                        res_ce[i] = conc_p
+                                        if all(r is not None for r in res_ce):
+                                            actuals_ce = res_ce
+                            if actuals_ce is not None:
+                                mono_name = ensure_monomorph_for_enum(enum_name, actuals_ce)
+                                return mono_name
+                            return enum_name
                     if (
                         unify_types(payload, arg_types[0]) is None
                         and unify_types(arg_types[0], payload) is None
@@ -6308,12 +6739,22 @@ def check_types(prog: Program):
                 ):
                     return
                 common = unify_types(actual, expected_ret)
+                def _is_mono_of(actual_t, expected_t):
+                    if actual_t is None or expected_t is None:
+                        return False
+                    base_m = re.match(r"^([A-Za-z_]\w*)__mono__", actual_t)
+                    if not base_m:
+                        return False
+                    base = base_m.group(1)
+                    gm = re.fullmatch(re.escape(base) + r"<.+>", expected_t)
+                    return gm is not None
                 if actual != expected_ret and (not common or common != expected_ret):
-                    bhumi_report_error(
-                        getattr(stmt, "lineno", None),
-                        getattr(stmt, "col", None),
-                        f"Return type mismatch: expected {expected_ret}, got {actual}",
-                    )
+                    if not _is_mono_of(actual, expected_ret) and not _is_mono_of(actual.rstrip("*"), expected_ret.rstrip("*")):
+                        bhumi_report_error(
+                            getattr(stmt, "lineno", None),
+                            getattr(stmt, "col", None),
+                            f"Return type mismatch: expected {expected_ret}, got {actual}",
+                        )
             else:
                 if not (
                     func is not None
@@ -6342,14 +6783,44 @@ def check_types(prog: Program):
                 enum_base = enum_base.split("[", 1)[0]
             if "<" in enum_base:
                 enum_base = enum_base.split("<", 1)[0]
-            if enum_typ not in enum_defs:
+            def _resolve_match_enum(raw_typ):
+                bare = raw_typ.rstrip("*")
+                if bare in enum_defs:
+                    return enum_defs[bare], None, bare
+                gm2 = re.match(r"^([A-Za-z_]\w*)<", bare)
+                if gm2:
+                    base2 = gm2.group(1)
+                    if base2 in enum_defs:
+                        params_m = re.fullmatch(re.escape(base2) + r"<(.+)>", bare)
+                        if params_m:
+                            param_list = [p.strip() for p in params_m.group(1).split(",")]
+                            try:
+                                mono2 = ensure_monomorph_for_enum(base2, param_list)
+                                conc_variants = enum_variant_map.get(mono2)
+                                return enum_defs[base2], conc_variants, mono2
+                            except Exception:
+                                pass
+                        return enum_defs[base2], None, base2
+                mono_m2 = re.match(r"^([A-Za-z_]\w*)__mono__", bare)
+                if mono_m2:
+                    base3 = mono_m2.group(1)
+                    if base3 in enum_defs:
+                        conc_variants = enum_variant_map.get(bare)
+                        return enum_defs[base3], conc_variants, bare
+                return None, None, bare
+            resolved_edef, conc_variant_list, resolved_name = _resolve_match_enum(enum_typ)
+            if resolved_edef is None:
                 bhumi_report_error(
                     getattr(stmt.expr, "lineno", None),
                     getattr(stmt.expr, "col", None),
                     f"Cannot match on non-enum type '{enum_typ}'",
                 )
-            enum_def = enum_defs[enum_typ]
+            enum_def = resolved_edef
             defined_variants = {v.name for v in enum_def.variants}
+            if conc_variant_list is not None:
+                concrete_payload = {vname: payload for vname, payload in conc_variant_list}
+            else:
+                concrete_payload = {v.name: v.typ for v in enum_def.variants}
             seen_variants = set()
             for case in stmt.cases:
                 if case.variant not in defined_variants:
@@ -6358,10 +6829,7 @@ def check_types(prog: Program):
                         getattr(case, "col", None),
                         f"Enum '{enum_typ}' has no variant '{case.variant}'",
                     )
-                variant_info = next(
-                    v for v in enum_def.variants if v.name == case.variant
-                )
-                payload_type = variant_info.typ
+                payload_type = concrete_payload.get(case.variant)
                 if payload_type is None and case.binding is not None:
                     bhumi_report_error(
                         getattr(case, "lineno", None),
