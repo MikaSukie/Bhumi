@@ -350,7 +350,7 @@ def ensure_monomorph_call(
             bhumi_report_error(
                 None,
                 None,
-                f"Cannot infer return type for '{call_expr.name}' — no expected type provided",
+                f"Cannot infer return type for '{call_expr.name}', no expected type provided",
             )
     if not base_fn:
         return call_expr.name
@@ -3109,8 +3109,15 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         args_ir: List[str] = []
         arg_types: List[str] = []
         arg_vals: List[str] = []
-        for arg in expr.args:
-            a = gen_expr(arg, out)
+        _variant_arg_expected: List[Optional[str]] = [None] * len(expr.args)
+        if "->" in expr.name and expected is not None:
+            _gm_inner = re.fullmatch(r"[A-Za-z_]\w*<(.+)>", expected.rstrip("*"))
+            if _gm_inner:
+                _inner_types = [p.strip() for p in _gm_inner.group(1).split(",")]
+                for _i in range(min(len(_variant_arg_expected), len(_inner_types))):
+                    _variant_arg_expected[_i] = _inner_types[_i]
+        for _i, arg in enumerate(expr.args):
+            a = gen_expr(arg, out, expected=_variant_arg_expected[_i])
             ty2 = infer_type(arg)
             arg_types.append(ty2)
             arg_vals.append(a)
@@ -3861,6 +3868,18 @@ def infer_type(expr: Expr) -> str:
             return ename + "*"
         for fn in all_funcs:
             if fn.name == expr.name and fn.ret_type == "#":
+                arg_types_for_mono = [infer_type(a) for a in (expr.args or [])]
+                for ft_name, ft_ret in func_table.items():
+                    if not ft_name.startswith(expr.name + "__mono__"):
+                        continue
+                    for k, v in type_map.items():
+                        if v == ft_ret:
+                            return k
+                    if ft_ret.startswith("%struct."):
+                        return ft_ret[8:]
+                    if ft_ret.startswith("%enum."):
+                        return ft_ret[6:].rstrip("*")
+                    return ft_ret
                 return "#"
         if expr.name in func_table:
             ret_llvm_ty = func_table[expr.name]
@@ -5737,7 +5756,7 @@ def check_types(prog: Program):
                         bhumi_report_error(
                             getattr(a0, "lineno", None),
                             getattr(a0, "col", None),
-                            f"free() argument must be a pointer or string (or extern global). got '{v_typ}' — this looks like a stack/local variable",
+                            f"free() argument must be a pointer or string (or extern global). got '{v_typ}', this looks like a stack/local variable",
                         )
                     if v_typ == "undefined":
                         bhumi_report_error(
