@@ -5686,7 +5686,25 @@ def check_types(prog: Program):
             variant_name = expr.name
             if "->" in expr.name:
                 qualified_enum, variant_name = expr.name.split("->", 1)
-            arg_types = [check_expr(a) for a in expr.args]
+            _arg_expected: List[Optional[str]] = [None] * len(expr.args)
+            if "->" in expr.name and expected is not None:
+                _gm_ae = re.fullmatch(r"[A-Za-z_]\w*<(.+)>", expected.rstrip("*"))
+                if _gm_ae:
+                    _inner_types = [p.strip() for p in _gm_ae.group(1).split(",")]
+                    for _i in range(min(len(_arg_expected), len(_inner_types))):
+                        _arg_expected[_i] = _inner_types[_i]
+            else:
+                _fn_lookup = next(
+                    (f for f in prog.funcs if f.name == expr.name), None
+                )
+                if _fn_lookup is not None and getattr(_fn_lookup, "params", None):
+                    for _i, (_ptype, _) in enumerate(_fn_lookup.params):
+                        if _i < len(_arg_expected):
+                            _arg_expected[_i] = _ptype if _ptype != "#" else None
+            arg_types = [
+                check_expr(a, expected=_arg_expected[i] if i < len(_arg_expected) else None)
+                for i, a in enumerate(expr.args)
+            ]
             if expr.name in ("free", "bhumi_free"):
                 if len(expr.args) != 1:
                     bhumi_report_error(
