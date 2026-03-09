@@ -11,7 +11,7 @@ enum Option<T> {
     None;
 }
 
-pub fn safe_div_direct(int a, int b) <Respond> {
+pub fn safe_div_direct(int a, int b) <Respond<int, string>> {
     
     Option<int> x = Option:Some(42);
     
@@ -23,7 +23,7 @@ pub fn safe_div_direct(int a, int b) <Respond> {
 }
 
 pub fn test_safe_div_direct() <int> {
-    Respond r = safe_div_direct(10, 2);
+    Respond<int, string> r = safe_div_direct(10, 2);
     match (r) {
         Ok(v): {
             printnl("quotient: ");
