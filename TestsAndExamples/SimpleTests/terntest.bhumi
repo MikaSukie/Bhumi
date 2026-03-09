@@ -5,5 +5,5 @@ enum Toggle {
 
 fn main() <void> {
     bool x = true;
-    Toggle t = x ? Toggle:On : Toggle:Off;
+    Toggle t = x ? Toggle->On : Toggle->Off;
 }
