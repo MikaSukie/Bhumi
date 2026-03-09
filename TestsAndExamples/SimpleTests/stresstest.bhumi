@@ -201,7 +201,7 @@ pub fn test_mathoptest() <int> {
     print(tostring(x));
     print("\n");
 
-        x = 6;
+    x = 6;
     int y = (x & 3) | 8;
     int z = y >> 1;
     print("(x & 3) | 8: ");
@@ -342,7 +342,7 @@ pub fn test_enum1() <int> {
 // enum2
 enum Opt { None; Some: int; }
 pub fn test_enum2() <int> {
-  Opt o = Opt:Some(42);
+  Opt o = Opt->Some(42);
   match (o) {
     None:     { return 0; }
     Some(x):  { return x; }
@@ -407,7 +407,7 @@ pub fn main() <int> {
     print("=== TEST: generic_enum ===\n"); print(itostr(test_generic_enum())); newline();
     print("=== TEST: get_address ===\n"); test_get_address(); newline();
     print("=== TEST: multigeneric ===\n"); print(itostr(test_multigeneric())); newline();
-        print("=== TEST: tostringtest ===\n"); print(tostring(0)); newline();
+    print("=== TEST: tostringtest ===\n"); print(tostring(0)); newline();
 
     print("=== ALL TESTS FINISHED ===\n");
     return 0;
