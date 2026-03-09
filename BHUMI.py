@@ -292,6 +292,16 @@ def llvm_ty_of(typ: str) -> str:
         if type_map[typ] == "void":
             return "void"
         return type_map[typ]
+    _fixed_arr_m = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[(\d+)\]", typ)
+    if _fixed_arr_m:
+        elem_base, count = _fixed_arr_m.group(1), _fixed_arr_m.group(2)
+        elem_llvm = llvm_ty_of(elem_base)
+        return f"[{count} x {elem_llvm}]*"
+    _unsized_arr_m = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[\]", typ)
+    if _unsized_arr_m:
+        elem_base = _unsized_arr_m.group(1)
+        elem_llvm = llvm_ty_of(elem_base)
+        return f"{elem_llvm}*"
     if typ.startswith("%"):
         return typ
     return f"%struct.{typ}"
@@ -1347,9 +1357,13 @@ class Parser:
         while self.match("STAR"):
             base += "*"
         if self.match("LBRACKET"):
-            size_tok = self.expect("INT")
-            self.expect("RBRACKET")
-            base += f"[{size_tok.value}]"
+            if self.peek().kind == "INT":
+                size_tok = self.bump()
+                self.expect("RBRACKET")
+                base += f"[{size_tok.value}]"
+            else:
+                self.expect("RBRACKET")
+                base += "[]"
         return base
     def parse_enum_def(self) -> EnumDef:
         self.expect("ENUM")
@@ -3863,9 +3877,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         ir_name = _pick_ir_name(stmt.name)
         llvm_ty = None
         if "[" in stmt.typ:
-            base, count = stmt.typ.split("[")
-            count = count[:-1]
-            llvm_ty = f"[{count} x {type_map[base]}]"
+            base, rest = stmt.typ.split("[", 1)
+            count = rest[:-1]
+            elem_llvm = llvm_ty_of(base)
+            llvm_ty = f"[{count} x {elem_llvm}]"
             if stmt.name not in symbol_table.scopes[-1]:
                 out.append(f"  %{ir_name}_addr = alloca {llvm_ty}")
                 out.append(
@@ -4502,9 +4517,26 @@ def gen_func(fn: Func) -> List[str]:
         out = [f"define {ret_ty} @{fn.name}({param_sig}) {{", "entry:"]
     for typ, name in fn.params:
         llvm_ty = llvm_ty_of(typ)
-        out.append(f"  %{name}_addr = alloca {llvm_ty}")
-        out.append(f"  store {llvm_ty} %{name}, {llvm_ty}* %{name}_addr")
-        symbol_table.declare(name, llvm_ty, name)
+        _fixed_arr = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[(\d+)\]", typ)
+        _unsized_arr = re.fullmatch(r"([A-Za-z_]\w*(?:\*)*)\[\]", typ)
+        if _fixed_arr:
+            count = _fixed_arr.group(2)
+            out.append(f"  %{name}_addr = alloca {llvm_ty}")
+            out.append(f"  store {llvm_ty} %{name}, {llvm_ty}* %{name}_addr")
+            out.append(f"  %{name}_len = alloca i32")
+            out.append(f"  store i32 {count}, i32* %{name}_len")
+            inner_ty = llvm_ty[:-1]  # strip trailing *
+            symbol_table.declare(name, inner_ty, name)
+        elif _unsized_arr:
+            out.append(f"  %{name}_addr = alloca {llvm_ty}")
+            out.append(f"  store {llvm_ty} %{name}, {llvm_ty}* %{name}_addr")
+            out.append(f"  %{name}_len = alloca i32")
+            out.append(f"  store i32 -1, i32* %{name}_len")
+            symbol_table.declare(name, llvm_ty, name)
+        else:
+            out.append(f"  %{name}_addr = alloca {llvm_ty}")
+            out.append(f"  store {llvm_ty} %{name}, {llvm_ty}* %{name}_addr")
+            symbol_table.declare(name, llvm_ty, name)
     decls = []
     def walk(node):
         if node is None:
@@ -4531,9 +4563,10 @@ def gen_func(fn: Func) -> List[str]:
             continue
         seen.add(stmt.name)
         if "[" in stmt.typ:
-            base, count = stmt.typ.split("[")
-            count = count[:-1]
-            llvm_ty = f"[{count} x {type_map[base]}]"
+            base, rest = stmt.typ.split("[", 1)
+            count = rest[:-1]
+            elem_llvm = llvm_ty_of(base)
+            llvm_ty = f"[{count} x {elem_llvm}]"
             if not symbol_table.lookup(stmt.name):
                 out.append(f"  %{stmt.name}_addr = alloca {llvm_ty}")
                 out.append(
