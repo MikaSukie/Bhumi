@@ -127,8 +127,8 @@ SINGLE_CHARS = {
 MULTI_CHARS = {
     "==": "EQEQ",      "!=": "NEQ",
     "<=": "LE",        ">=": "GE",
-    "<<": "LSHIFT",    ">>": "RSHIFT",
     "<<=": "LSHIFTEQ", ">>=": "RSHIFTEQ",
+    "<<": "LSHIFT",    ">>": "RSHIFT",
     "+=": "PLUSEQ",    "-=": "MINUSEQ",
     "*=": "STAREQ",    "/=": "SLASHEQ",
     "%=": "PERCENTEQ",
@@ -2057,7 +2057,7 @@ class Parser:
                 return Call("BHC.get_args", [])
             if t.kind == "IDENT":
                 ident_name = t.value
-                if self.peek().kind == "COLON":
+                if self.peek().kind == "ARROW":
                     self.bump()
                     variant_tok = self.expect("IDENT")
                     variant_name = variant_tok.value
@@ -2066,7 +2066,7 @@ class Parser:
                         if self.peek().kind != "RPAREN":
                             args.append(self.parse_expr())
                         self.expect("RPAREN")
-                    return Call(f"{ident_name}:{variant_name}", args)
+                    return Call(f"{ident_name}->{variant_name}", args)
                 base = Var(ident_name)
                 if self.peek().kind == "LBRACE":
                     self.bump()
@@ -3104,8 +3104,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
     if isinstance(expr, Call):
         qualified_enum = None
         variant_name = expr.name
-        if ":" in expr.name:
-            qualified_enum, variant_name = expr.name.split(":", 1)
+        if "->" in expr.name:
+            qualified_enum, variant_name = expr.name.split("->", 1)
         args_ir: List[str] = []
         arg_types: List[str] = []
         arg_vals: List[str] = []
@@ -3152,10 +3152,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
                 for ename, idx, payload in candidates:
                     payload_desc = "no payload" if payload is None else f"payload={payload}"
-                    msg_lines.append(f"  - {ename}:{variant_name}  ({payload_desc})")
+                    msg_lines.append(f"  - {ename}->{variant_name}  ({payload_desc})")
                 msg_lines.append("")
                 msg_lines.append("To fix, qualify the variant with its enum name:")
-                msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}:{variant_name}(...)")
+                msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}->{variant_name}(...)")
                 bhumi_report_error(use_site_line, use_site_col, "\n".join(msg_lines))
         if found_enum is not None:
             template = globals().get("original_enum_defs", {}).get(found_enum)
@@ -3816,8 +3816,8 @@ def infer_type(expr: Expr) -> str:
     if isinstance(expr, Call):
         _infer_qualified_enum = None
         _infer_variant_name = expr.name
-        if ":" in expr.name:
-            _infer_qualified_enum, _infer_variant_name = expr.name.split(":", 1)
+        if "->" in expr.name:
+            _infer_qualified_enum, _infer_variant_name = expr.name.split("->", 1)
         _infer_matches = []
         for ename, variants in enum_variant_map.items():
             if "__mono__" in ename:
@@ -5684,8 +5684,8 @@ def check_types(prog: Program):
         if isinstance(expr, Call):
             qualified_enum = None
             variant_name = expr.name
-            if ":" in expr.name:
-                qualified_enum, variant_name = expr.name.split(":", 1)
+            if "->" in expr.name:
+                qualified_enum, variant_name = expr.name.split("->", 1)
             arg_types = [check_expr(a) for a in expr.args]
             if expr.name in ("free", "bhumi_free"):
                 if len(expr.args) != 1:
@@ -5941,10 +5941,10 @@ def check_types(prog: Program):
                     msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
                     for ename, payload in candidates:
                         payload_desc = "no payload" if payload is None else f"payload={payload}"
-                        msg_lines.append(f"  - {ename}:{variant_name}  ({payload_desc})")
+                        msg_lines.append(f"  - {ename}->{variant_name}  ({payload_desc})")
                     msg_lines.append("")
                     msg_lines.append("To fix, qualify the variant with its enum name:")
-                    msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}:{variant_name}(...)")
+                    msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}->{variant_name}(...)")
                     bhumi_report_error(
                         getattr(expr, "lineno", None),
                         getattr(expr, "col", None),
