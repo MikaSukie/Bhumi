@@ -31,7 +31,10 @@ def _visual_col(
 def bhumi_report_error(
     line: int | None, col: int | None, msg: str, length: int = 1
 ) -> NoReturn:
-    print("[BhumiCompiler] Error: " + str(msg))
+    if "[Crawl-Checker]-[ERR]" in str(msg):
+        print(str(msg))
+    else:
+        print("[BhumiCompiler] Error: " + str(msg))
     src_lines = _bhumi_get_source_lines()
     if line is not None and 1 <= line <= len(src_lines):
         raw_line = src_lines[line - 1]
@@ -6504,7 +6507,7 @@ def check_types(prog: Program):
         bhumi_report_error(
             None,
             None,
-            "[Crawl-Checker]-[ERR] Crumble limits exceeded: " + "; ".join(msgs),
+            "[Crawl-Checker]-[ERR]: Crumble limits exceeded: " + "; ".join(msgs),
         )
     for name, (rmax, wmax, rc, wc) in list(crumb_map.items()):
         if rmax is not None and rc < rmax:
