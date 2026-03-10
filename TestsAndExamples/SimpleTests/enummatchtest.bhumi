@@ -25,11 +25,11 @@ pub fn safe_div_direct(int a, int b) <Respond<int, string>> {
 pub fn test_safe_div_direct() <int> {
     Respond<int, string> r = safe_div_direct(10, 2);
     match (r) {
-        Ok(v): {
+        Ok(v) {
             printnl("quotient: ");
             print(itostr(v)); newline();
         }
-        Err(msg): {
+        Err(msg) {
             print("error: "); print(msg); newline();
         }
     }
