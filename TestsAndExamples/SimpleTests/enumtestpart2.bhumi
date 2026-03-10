@@ -33,7 +33,9 @@ pub fn test_safe_div_direct() <int> {
         }
     }
     return 0;
-}enum Exist<T> {
+}
+
+enum Exist<T> {
   None;
   Some: T;
 }
