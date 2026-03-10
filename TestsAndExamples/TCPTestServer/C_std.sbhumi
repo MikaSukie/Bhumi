@@ -17,16 +17,12 @@ pub extern fn ftostr(float f)<string>;
 pub extern fn btostr(bool b)  <string>;
 pub extern fn tostr(string s)<string>;
 
-pub fn safestring(string s) <string> {
-    return sb_create() + s;
-}
 pub extern fn tofloat(int x) <float>;
 pub extern fn toint(float x) <int>;
 pub extern fn toint_round(float x) <int>;
 pub extern fn rmtrz(float x) <string>;
 pub extern fn contains(string var, string detection_char) <bool>;
 pub extern fn countcontain(string x, string detection_char) <int>;
-pub fn empty() <string> { return tostr(""); }
 
 pub extern fn system(string s)<int>;
 pub extern fn ilength(int integer)<int>;
@@ -67,10 +63,8 @@ pub fn input(string s) <#> {
 pub extern fn print(string s)  <void>;
 pub extern fn eprint(string s) <void>;
 
-pub extern fn read_file(string path) <string>;
 pub extern fn write_file(string path, string content) <bool>;
 pub extern fn append_file(string path, string content) <bool>;
-pub extern fn file_exists(string path) <bool>;
 pub extern fn read_lines(string path) <string>;
 pub extern fn free_str(string s) <void>;
 pub extern fn delete_file(string s) <void>;
@@ -79,16 +73,6 @@ pub extern fn isalnum_at(int i, string s) <bool>;
 pub extern fn isspace_at(int i, string s) <bool>;
 pub extern fn isalpha_at(int i, string s) <bool>;
 pub extern fn isnum_at(int i, string s) <bool>;
-
-pub fn try_read_file(string path) <string> {
-    autoregion {
-        if (file_exists(path)) {
-            return read_file(path);
-        } else {
-            return "";
-        }
-    }
-}
 
 pub fn save_text(string path, string text) <bool> {
     return write_file(path, text);
@@ -172,3 +156,15 @@ pub extern fn Uget_bool(int h)       <bool>;
 pub extern fn Uget_string(int h)   <string>;
 
 pub extern fn Ufree_union(int h)     <void>;
+
+fn empty() <string> { return""; }
+
+enum Exist<T> {
+  None;
+  Some(T);
+}
+
+enum Respond<T, E> { 
+    Ok(T);
+    Err(E);
+}
