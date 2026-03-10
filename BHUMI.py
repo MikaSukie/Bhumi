@@ -666,6 +666,37 @@ def emit_cast_value(
     dst_llvm = llvm_ty_of(dst_t)
     if src_llvm == dst_llvm:
         return val
+    if src_llvm.startswith("%enum.") and src_llvm.endswith("*"):
+        enum_name = src_llvm[len("%enum."):-1]
+        variants = enum_variant_map.get(enum_name, [])
+        payload_types = [p for (_, p) in variants if p is not None]
+        matching_payload = None
+        for p in payload_types:
+            if llvm_ty_of(p) == dst_llvm:
+                matching_payload = p
+                break
+            p_llvm = llvm_ty_of(p)
+            if p_llvm.endswith("*") and dst_llvm.endswith("*"):
+                matching_payload = p
+                break
+        if matching_payload is not None:
+            payload_llvm = llvm_ty_of(matching_payload)
+            raw_ptr = new_tmp()
+            out.append(
+                f"  {raw_ptr} = getelementptr inbounds %enum.{enum_name}, "
+                f"%enum.{enum_name}* {val}, i32 0, i32 1"
+            )
+            cast_ptr = new_tmp()
+            out.append(
+                f"  {cast_ptr} = bitcast [8 x i8]* {raw_ptr} to {payload_llvm}*"
+            )
+            loaded = new_tmp()
+            out.append(f"  {loaded} = load {payload_llvm}, {payload_llvm}* {cast_ptr}")
+            if payload_llvm != dst_llvm:
+                final = new_tmp()
+                out.append(f"  {final} = bitcast {payload_llvm} {loaded} to {dst_llvm}")
+                return final
+            return loaded
     if src_llvm.endswith("*") and dst_llvm.endswith("*"):
         tmp = new_tmp()
         out.append(f"  {tmp} = bitcast {src_llvm} {val} to {dst_llvm}")
@@ -1137,6 +1168,7 @@ loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
+_expr_type_cache: Dict[int, str] = {}
 mono_map: Dict[str, str] = {}
 class Parser:
     def __init__(self, tokens: List[Token]):
@@ -3660,6 +3692,9 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         f"Unhandled expr: {expr}",
     )
 def infer_type(expr: Expr) -> str:
+    cached = _expr_type_cache.get(id(expr))
+    if cached is not None:
+        return cached
     if isinstance(expr, CallerType):
         return "#"
     if isinstance(expr, UnaryDeref):
@@ -4577,11 +4612,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             if case.nested_pattern is None:
                 if outer_payload_val is not None and case.binding is not None:
                     llvm_payload_ty = llvm_ty_of(outer_payload_type)
-                    out.append(f"  %{case.binding}_addr = alloca {llvm_payload_ty}")
+                    binding_ir = f"{case.binding}_{new_tmp().lstrip('%')}"
+                    out.append(f"  %{binding_ir}_addr = alloca {llvm_payload_ty}")
                     out.append(
-                        f"  store {llvm_payload_ty} {outer_payload_val}, {llvm_payload_ty}* %{case.binding}_addr"
+                        f"  store {llvm_payload_ty} {outer_payload_val}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
-                    symbol_table.declare(case.binding, llvm_payload_ty, case.binding)
+                    symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
                 for s in case.body:
                     gen_stmt(s, out, ret_ty)
                 last = out[-1].strip() if out else ""
@@ -4734,11 +4770,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     f"  {loaded_payload} = load {llvm_payload_ty}, {llvm_payload_ty}* {payload_ptr_cast}"
                 )
                 if case.nested_pattern is None and case.binding is not None:
-                    out.append(f"  %{case.binding}_addr = alloca {llvm_payload_ty}")
+                    binding_ir = f"{case.binding}_{new_tmp().lstrip('%')}"
+                    out.append(f"  %{binding_ir}_addr = alloca {llvm_payload_ty}")
                     out.append(
-                        f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{case.binding}_addr"
+                        f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
-                    symbol_table.declare(case.binding, llvm_payload_ty, case.binding)
+                    symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
             if case.nested_pattern is not None:
                 gen_nested_match_case(
                     case, enum_name, enum_ptr,
@@ -4935,6 +4972,349 @@ def gen_func(fn: Func) -> List[str]:
     globals()["__bhumi_current_codegen_fn"] = None
     symbol_table.pop()
     return out
+def annotate_types(prog: Program) -> None:
+    global _expr_type_cache
+    _expr_type_cache.clear()
+    ann_env = TypeEnv()
+    for g in prog.globals:
+        ann_env.declare(g.name, g.typ)
+    def _cache(expr: Expr, typ: str) -> str:
+        _expr_type_cache[id(expr)] = typ
+        return typ
+    def _ann_expr(expr: Expr, expected: Optional[str] = None) -> Optional[str]:
+        if expr is None:
+            return None
+        existing = _expr_type_cache.get(id(expr))
+        if existing is not None:
+            return existing
+        if isinstance(expr, IntLit):
+            return _cache(expr, "int")
+        if isinstance(expr, FloatLit):
+            t = "float32" if getattr(expr, "bits", 64) == 32 else "float"
+            return _cache(expr, t)
+        if isinstance(expr, BoolLit):
+            return _cache(expr, "bool")
+        if isinstance(expr, CharLit):
+            return _cache(expr, "char")
+        if isinstance(expr, StrLit):
+            return _cache(expr, "string")
+        if isinstance(expr, NullLit):
+            return _cache(expr, "null")
+        if isinstance(expr, CallerType):
+            t = expected if expected is not None else "#"
+            return _cache(expr, t)
+        if isinstance(expr, Cast):
+            _ann_expr(expr.expr)
+            return _cache(expr, expr.typ)
+        if isinstance(expr, TypeofExpr):
+            _ann_expr(expr.expr)
+            return _cache(expr, "string")
+        if isinstance(expr, Var):
+            t = ann_env.lookup(expr.name)
+            if t is None:
+                return None
+            return _cache(expr, t)
+        if isinstance(expr, AddressOf):
+            inner_t = _ann_expr(expr.expr)
+            if inner_t is None:
+                return None
+            return _cache(expr, inner_t + "*")
+        if isinstance(expr, UnaryDeref):
+            ptr_t = _ann_expr(expr.ptr)
+            if ptr_t is None or not ptr_t.endswith("*"):
+                return None
+            return _cache(expr, ptr_t[:-1])
+        if isinstance(expr, UnaryOp):
+            inner_t = _ann_expr(expr.expr)
+            if inner_t is None:
+                return None
+            if expr.op == "!":
+                return _cache(expr, "bool")
+            return _cache(expr, inner_t)
+        if isinstance(expr, BinOp):
+            left_t  = _ann_expr(expr.left)
+            right_t = _ann_expr(expr.right)
+            if left_t is None or right_t is None:
+                return None
+            if expr.op in {"==", "!=", "<", "<=", ">", ">=", "&&", "||"}:
+                return _cache(expr, "bool")
+            common = unify_int_types(left_t, right_t) or (left_t if left_t == right_t else None)
+            if common is None:
+                return None
+            return _cache(expr, common)
+        if isinstance(expr, Ternary):
+            _ann_expr(expr.cond, "bool")
+            then_t = _ann_expr(expr.then_expr, expected)
+            _ann_expr(expr.else_expr, expected)
+            if then_t is not None:
+                return _cache(expr, then_t)
+            return None
+        if isinstance(expr, AwaitExpr):
+            inner = expr.expr
+            if isinstance(inner, Call):
+                base_fn = next((f for f in all_funcs if f.name == inner.name), None)
+                if base_fn is not None:
+                    _ann_expr(inner)
+                    return _cache(expr, base_fn.ret_type)
+            return None
+        if isinstance(expr, VAwaitExpr):
+            _ann_expr(expr.expr)
+            return None
+        if isinstance(expr, FieldAccess):
+            base_t = _ann_expr(expr.base)
+            if base_t is None:
+                return None
+            base_name = base_t.rstrip("*")
+            if base_name.startswith("%struct."):
+                base_name = base_name[len("%struct."):]
+            if base_name in struct_field_map:
+                field_dict = dict(struct_field_map[base_name])
+                ft = field_dict.get(expr.field)
+                if ft is not None:
+                    return _cache(expr, ft)
+            return None
+        if isinstance(expr, Index):
+            _ann_expr(expr.index)
+            if not isinstance(expr.array, Var):
+                return None
+            arr_info = ann_env.lookup(expr.array.name)
+            if arr_info is None:
+                return None
+            if "[" in arr_info:
+                base = arr_info.split("[", 1)[0]
+                _cache(expr.array, arr_info)
+                return _cache(expr, base)
+            return None
+        if isinstance(expr, StructInit):
+            for _, fexpr in expr.fields:
+                _ann_expr(fexpr)
+            return _cache(expr, expr.name + "*")
+        if isinstance(expr, ArrayInit):
+            elem_t = None
+            for el in expr.elements:
+                t = _ann_expr(el)
+                if elem_t is None:
+                    elem_t = t
+            if elem_t is None:
+                return None
+            return _cache(expr, f"{elem_t}[{len(expr.elements)}]")
+        if isinstance(expr, Call):
+            variant_name = expr.name
+            qualified_enum = None
+            if "->" in expr.name:
+                qualified_enum, variant_name = expr.name.split("->", 1)
+            matches = []
+            for ename, variants in enum_variant_map.items():
+                if "__mono__" in ename:
+                    continue
+                if qualified_enum is not None and ename != qualified_enum:
+                    continue
+                for vname, payload in variants:
+                    if vname == variant_name:
+                        orig = globals().get("original_enum_defs", {}).get(ename)
+                        tparams = getattr(orig, "type_params", []) if orig else []
+                        matches.append((ename, payload, bool(tparams)))
+                        break
+            if matches:
+                concrete = [(e, p, g) for e, p, g in matches if not g]
+                chosen_enum, chosen_payload, has_tparams = (concrete[0] if concrete else matches[0])
+                orig_edef = globals().get("original_enum_defs", {}).get(chosen_enum)
+                tparams = getattr(orig_edef, "type_params", []) if orig_edef else []
+                payload_expected: Optional[str] = None
+                if has_tparams and chosen_payload is not None and chosen_payload in tparams:
+                    if expected is not None:
+                        exp_bare = expected.rstrip("*")
+                        gm_exp = re.fullmatch(re.escape(chosen_enum) + r"<(.+)>", exp_bare)
+                        if gm_exp:
+                            parts = [p.strip() for p in gm_exp.group(1).split(",")]
+                            if len(tparams) == 1 and len(parts) == 1:
+                                payload_expected = parts[0]
+                            elif len(parts) == len(tparams):
+                                idx = tparams.index(chosen_payload)
+                                payload_expected = parts[idx]
+                        if payload_expected is None:
+                            mono_prefix = chosen_enum + "__mono__"
+                            if exp_bare.startswith(mono_prefix):
+                                mono_suffix = exp_bare[len(mono_prefix):]
+                                parts = mono_suffix.split("_")
+                                for k, v in type_map.items():
+                                    if mangle_type(k) == mono_suffix or k == mono_suffix:
+                                        payload_expected = k
+                                        break
+                                if payload_expected is None and len(parts) >= 1:
+                                    payload_expected = parts[0]
+                else:
+                    payload_expected = chosen_payload
+                arg_types = [_ann_expr(a, expected=payload_expected) for a in (expr.args or [])]
+                if has_tparams and chosen_payload is not None and chosen_payload in tparams:
+                    actual_payload = (arg_types[0] if arg_types else None) or payload_expected
+                    if actual_payload is not None:
+                        if len(tparams) == 1:
+                            try:
+                                mono = ensure_monomorph_for_enum(chosen_enum, [actual_payload])
+                                return _cache(expr, mono + "*")
+                            except Exception:
+                                pass
+                        else:
+                            if expected is not None:
+                                exp_bare = expected.rstrip("*")
+                                gm = re.fullmatch(re.escape(chosen_enum) + r"<(.+)>", exp_bare)
+                                if gm:
+                                    parts = [p.strip() for p in gm.group(1).split(",")]
+                                    if len(parts) == len(tparams):
+                                        try:
+                                            mono = ensure_monomorph_for_enum(chosen_enum, parts)
+                                            return _cache(expr, mono + "*")
+                                        except Exception:
+                                            pass
+                    return _cache(expr, chosen_enum + "*")
+                if type_map.get(chosen_enum, "").startswith("i") and chosen_payload is None:
+                    return _cache(expr, chosen_enum)
+                return _cache(expr, chosen_enum + "*")
+            base_fn = next((f for f in all_funcs if f.name == expr.name), None)
+            arg_expected: List[Optional[str]] = []
+            if base_fn is not None and base_fn.params:
+                for (ptype, _) in base_fn.params:
+                    arg_expected.append(None if ptype in (getattr(base_fn, "type_params", []) or []) else ptype)
+            while len(arg_expected) < len(expr.args or []):
+                arg_expected.append(None)
+            arg_types = [_ann_expr(a, expected=arg_expected[i])
+                         for i, a in enumerate(expr.args or [])]
+            if base_fn is not None and base_fn.ret_type == "#":
+                if expected is not None:
+                    return _cache(expr, expected)
+                for ft_name in func_table:
+                    if ft_name.startswith(expr.name + "__mono__"):
+                        ret_llvm = func_table[ft_name]
+                        for k, v in type_map.items():
+                            if v == ret_llvm:
+                                return _cache(expr, k)
+                return None
+            if base_fn is not None and getattr(base_fn, "type_params", None):
+                concrete_arg_types = [t for t in arg_types if t is not None]
+                if concrete_arg_types:
+                    try:
+                        mononame = ensure_monomorph_call(expr, [], expected_ret=expected)
+                        ret_llvm = func_table.get(mononame)
+                        if ret_llvm is not None:
+                            for k, v in type_map.items():
+                                if v == ret_llvm:
+                                    return _cache(expr, k)
+                            if ret_llvm.startswith("%struct."):
+                                return _cache(expr, ret_llvm[8:] + "*")
+                            if ret_llvm.startswith("%enum."):
+                                return _cache(expr, ret_llvm[6:].rstrip("*") + "*")
+                    except Exception:
+                        pass
+                return None
+            if expr.name in func_table:
+                ret_llvm = func_table[expr.name]
+                for k, v in type_map.items():
+                    if v == ret_llvm:
+                        return _cache(expr, k)
+                if ret_llvm.startswith("%struct."):
+                    return _cache(expr, ret_llvm[8:] + "*")
+                if ret_llvm.startswith("%enum."):
+                    return _cache(expr, ret_llvm[6:].rstrip("*") + "*")
+                return _cache(expr, ret_llvm)
+            if base_fn is not None:
+                ret = base_fn.ret_type
+                if ret and ret != "#":
+                    return _cache(expr, ret)
+            return None
+        return None
+    def _ann_stmt(stmt: Stmt, ret_type: str):
+        if stmt is None:
+            return
+        if isinstance(stmt, VarDecl):
+            ann_env.declare(stmt.name, stmt.typ)
+            if stmt.expr:
+                _ann_expr(stmt.expr, expected=stmt.typ)
+            return
+        if isinstance(stmt, Assign):
+            if isinstance(stmt.name, str):
+                var_t = ann_env.lookup(stmt.name)
+                _ann_expr(stmt.expr, expected=var_t)
+            elif isinstance(stmt.name, UnaryDeref):
+                _ann_expr(stmt.name.ptr)
+                _ann_expr(stmt.expr)
+            return
+        if isinstance(stmt, IndexAssign):
+            _ann_expr(stmt.index)
+            _ann_expr(stmt.value)
+            return
+        if isinstance(stmt, ExprStmt):
+            _ann_expr(stmt.expr)
+            return
+        if isinstance(stmt, ReturnStmt):
+            if stmt.expr:
+                _ann_expr(stmt.expr, expected=ret_type)
+            return
+        if isinstance(stmt, IfStmt):
+            _ann_expr(stmt.cond, "bool")
+            ann_env.push()
+            for s in (stmt.then_body or []):
+                _ann_stmt(s, ret_type)
+            ann_env.pop()
+            if stmt.else_body:
+                ann_env.push()
+                if isinstance(stmt.else_body, list):
+                    for s in stmt.else_body:
+                        _ann_stmt(s, ret_type)
+                else:
+                    _ann_stmt(stmt.else_body, ret_type)
+                ann_env.pop()
+            return
+        if isinstance(stmt, WhileStmt):
+            _ann_expr(stmt.cond, "bool")
+            ann_env.push()
+            for s in (stmt.body or []):
+                _ann_stmt(s, ret_type)
+            ann_env.pop()
+            return
+        if isinstance(stmt, Match):
+            _ann_expr(stmt.expr)
+            for case in stmt.cases:
+                ann_env.push()
+                matched_type = _expr_type_cache.get(id(stmt.expr))
+                if matched_type and case.binding:
+                    bare = matched_type.rstrip("*")
+                    variants = enum_variant_map.get(bare, [])
+                    for vname, payload in variants:
+                        if vname == case.variant and payload:
+                            ann_env.declare(case.binding, payload)
+                            break
+                for s in (case.body or []):
+                    _ann_stmt(s, ret_type)
+                ann_env.pop()
+            return
+        if isinstance(stmt, AutoRegion):
+            ann_env.push()
+            for s in (stmt.body or []):
+                _ann_stmt(s, ret_type)
+            ann_env.pop()
+            return
+        if isinstance(stmt, (ContinueStmt, BreakStmt, CrumbleStmt, ForgetStmt)):
+            return
+        for attr in getattr(stmt, "__dict__", {}):
+            val = getattr(stmt, attr)
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, Stmt):
+                        _ann_stmt(item, ret_type)
+                    elif isinstance(item, Expr):
+                        _ann_expr(item)
+    for fn in prog.funcs:
+        if fn.is_extern:
+            continue
+        if fn.type_params or fn.ret_type == "#":
+            continue
+        ann_env.push()
+        for (param_typ, param_name) in (fn.params or []):
+            ann_env.declare(param_name, param_typ)
+        for stmt in (fn.body or []):
+            _ann_stmt(stmt, fn.ret_type)
+        ann_env.pop()
 def compile_program(prog: Program) -> str:
     global all_funcs, func_table, builtins_emitted
     all_funcs = prog.funcs[:]
@@ -7419,6 +7799,7 @@ def main():
     args = parser.parse_args()
     global compiled
     compiled = args.input
+    _expr_type_cache.clear()
     with open(args.input, encoding="utf-8", errors="ignore") as f:
         src = f.read()
     tokens = lex(src)
@@ -7521,6 +7902,17 @@ def main():
                 f"Async function '{fn.name}' has an empty body; async functions must contain at least one statement or be removed.",
             )
     check_types(final_prog)
+    func_table.clear()
+    for _fn in final_prog.funcs:
+        if _fn.type_params or _fn.ret_type == "#":
+            continue
+        func_table[_fn.name] = llvm_ty_of(_fn.ret_type)
+    func_table.update({
+        "exit": "void", "malloc": "i8*", "free": "void",
+        "puts": "i32", "strlen": "i64",
+        "bhumi_argc": "i64", "bhumi_argv": "i8*",
+    })
+    annotate_types(final_prog)
     llvm = compile_program(final_prog)
     with open(args.output, "w", encoding="utf-8", errors="ignore") as f:
         f.write(llvm)
