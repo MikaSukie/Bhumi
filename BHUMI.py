@@ -108,6 +108,7 @@ KEYWORDS = {
     "async",    "await",     "vasync",    "vawait",
     "continue", "break",
     "nomd",     "pin",       "crumble",
+    "nown",
     "typeswitch","typecase", "fallback",
     "autoregion","except",
 }
@@ -1147,6 +1148,7 @@ class Func:
     vasync_except: List[str] = None
     _vasync_captured: Optional[set] = None
     is_variadic: bool = False
+    is_nown: bool = False
     def __post_init__(self):
         if self.vasync_except is None:
             self.vasync_except = []
@@ -1168,6 +1170,7 @@ loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
+_entry_alloca_buf: List[str] = []
 _expr_type_cache: Dict[int, str] = {}
 mono_map: Dict[str, str] = {}
 class Parser:
@@ -1447,6 +1450,7 @@ class Parser:
         is_extern = False
         is_async = False
         is_vasync = False
+        is_nown = False
         while True:
             tk = self.peek().kind
             if tk == "EXTERN":
@@ -1455,6 +1459,10 @@ class Parser:
                 continue
             if tk in {"PUB", "PRIV", "PROT"}:
                 access = self.bump().kind.lower()
+                continue
+            if tk == "NOWN":
+                is_nown = True
+                self.bump()
                 continue
             if tk == "ASYNC":
                 if no_runtime:
@@ -1566,7 +1574,7 @@ class Parser:
         self.expect("GT")
         if is_extern:
             self.expect("SEMI")
-            return Func(
+            fn_ext = Func(
                 access,
                 name,
                 type_params,
@@ -1579,10 +1587,12 @@ class Parser:
                 list(vasync_except),
                 is_variadic=variadic,
             )
+            fn_ext.is_nown = is_nown
+            return fn_ext
         self.expect("LBRACE")
         body = self.parse_block()
         self.expect("RBRACE")
-        return Func(
+        fn_reg = Func(
             access,
             name,
             type_params,
@@ -1595,6 +1605,8 @@ class Parser:
             list(vasync_except),
             is_variadic=variadic,
         )
+        fn_reg.is_nown = is_nown
+        return fn_reg
     def parse_block(self) -> List[Stmt]:
         stmts = []
         while self.peek().kind != "RBRACE":
@@ -2581,7 +2593,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     and not base_val.startswith("%struct.")
                 ):
                     tmp_addr = new_tmp()
-                    out.append(f"  {tmp_addr} = alloca %struct.{base_name}")
+                    _entry_alloca_buf.append(f"  {tmp_addr} = alloca %struct.{base_name}")
                     out.append(
                         f"  store %struct.{base_name} {base_val}, %struct.{base_name}* {tmp_addr}"
                     )
@@ -2961,10 +2973,18 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             cr["rc"] = int(cr.get("rc", 0) or 0) + 1
             cr["owned"] = bool(cr.get("owned", False)) or (vn in owned_vars)
             rmax = cr.get("rmax")
+            wmax = cr.get("wmax")
             if rmax is not None and cr["rc"] == rmax and cr.get("owned"):
                 cr.setdefault("_deferred_frees", []).append((vn, tmp, typ))
                 cr["owned"] = False
                 owned_vars.discard(vn)
+                if wmax is None:
+                    print(
+                        f"[Bhumi] Warning: crumble '{vn}' autofreed after {rmax} read(s); "
+                        f"no write limit (!w) was set, {cr.get('wc', 0)} write(s) consumed. "
+                        f"Set crumble({vn})!w=<count>; to silence this.",
+                        file=__import__("sys").stderr,
+                    )
         return tmp
     if isinstance(expr, BinOp):
         lhs = gen_expr(expr.left, out)
@@ -3444,6 +3464,29 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 f"Call to undefined function or unresolved monomorph '{expr.name}'",
             )
         if ret_ty == "void":
+            if call_target == "free" and len(arg_vals) == 1:
+                ptr_val = arg_vals[0]
+                ptr_ty  = arg_types[0] if arg_types else "void*"
+                ptr_llvm = llvm_ty_of(ptr_ty) if ptr_ty else "i8*"
+                if ptr_llvm == "i8*":
+                    ptr_i8 = ptr_val
+                else:
+                    ptr_i8 = new_tmp()
+                    out.append(f"  {ptr_i8} = bitcast {ptr_llvm} {ptr_val} to i8*")
+                out.append(f"  call void @bhumi_c_free(i8* {ptr_i8})")
+                if expr.args and isinstance(expr.args[0], Var):
+                    _fvn = expr.args[0].name
+                    _fsym = symbol_table.lookup(_fvn)
+                    if _fsym is not None:
+                        _fty, _fname = _fsym
+                        _faddr = f"@{_fname}" if _fname.startswith("@") else f"%{_fname}_addr"
+                        out.append(f"  store {_fty} null, {_fty}* {_faddr}")
+                        if _fvn in crumb_runtime:
+                            crumb_runtime[_fvn]["owned"] = False
+                        owned_vars.discard(_fvn)
+                for arg_expr, arg_val in zip(expr.args, arg_vals):
+                    _maybe_flush_deferred(arg_expr, arg_val)
+                return ""
             out.append(f"  call void @{call_target}({', '.join(args_ir)})")
             for arg_expr, arg_val in zip(expr.args, arg_vals):
                 _maybe_flush_deferred(arg_expr, arg_val)
@@ -3574,7 +3617,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     and not base_val.startswith("%struct.")
                 ):
                     tmp_addr = new_tmp()
-                    out.append(f"  {tmp_addr} = alloca %struct.{base_name}")
+                    _entry_alloca_buf.append(f"  {tmp_addr} = alloca %struct.{base_name}")
                     out.append(
                         f"  store %struct.{base_name} {base_val}, %struct.{base_name}* {tmp_addr}"
                     )
@@ -3634,7 +3677,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         elem_llvm = llvm_ty_of(elem_t)
         arr_llvm_ty = f"[{count} x {elem_llvm}]"
         tmp_ptr = new_tmp()
-        out.append(f"  {tmp_ptr} = alloca {arr_llvm_ty}")
+        _entry_alloca_buf.append(f"  {tmp_ptr} = alloca {arr_llvm_ty}")
         for i, el in enumerate(expr.elements):
             val = gen_expr(el, out)
             gep = new_tmp()
@@ -4034,10 +4077,20 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
                 if isinstance(stmt.expr, Call):
                     ret_t = infer_type(stmt.expr)
-                    if ret_t is not None and (ret_t.endswith("*") or ret_t == "string"):
+                    _nown_callee = getattr(next((f for f in all_funcs if f.name == stmt.expr.name), None), "is_nown", False)
+                    if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee:
                         owned_vars.add(stmt.name)
                         if stmt.name in crumb_runtime:
                             crumb_runtime[stmt.name]["owned"] = True
+                elif isinstance(stmt.expr, Var):
+                    _src_vn = stmt.expr.name
+                    if _src_vn in owned_vars:
+                        owned_vars.discard(_src_vn)
+                        owned_vars.add(stmt.name)
+                        if stmt.name in crumb_runtime:
+                            crumb_runtime[stmt.name]["owned"] = True
+                        if _src_vn in crumb_runtime:
+                            crumb_runtime[_src_vn]["owned"] = False
                 return
             if src_llvm.endswith("*") and not llvm_ty.endswith("*"):
                 bhumi_report_error(
@@ -4058,7 +4111,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
             if isinstance(stmt.expr, Call):
                 ret_t = infer_type(stmt.expr)
-                if ret_t is not None and (ret_t.endswith("*") or ret_t == "string"):
+                _nown_callee2 = getattr(next((f for f in all_funcs if f.name == stmt.expr.name), None), "is_nown", False)
+                if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee2:
                     owned_vars.add(stmt.name)
                     if stmt.name in crumb_runtime:
                         crumb_runtime[stmt.name]["owned"] = True
@@ -4098,9 +4152,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             handled_write_exhaustion_new_alloc = False
             if cr is not None:
                 cr["wc"] = (cr.get("wc", 0) or 0) + 1
+                _wmax = cr.get("wmax")
+                _rmax = cr.get("rmax")
                 if (
-                    cr.get("wmax") is not None
-                    and cr["wc"] == cr["wmax"]
+                    _wmax is not None
+                    and cr["wc"] == _wmax
                     and cr.get("owned")
                 ):
                     old_tmp = new_tmp()
@@ -4110,9 +4166,16 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(f"  call void @free(i8* {cast_tmp})")
                     cr["owned"] = False
                     owned_vars.discard(vn)
+                    if _rmax is None:
+                        print(
+                            f"[Bhumi] Warning: crumble '{vn}' autofreed after {_wmax} write(s); "
+                            f"no read limit (!r) was set, {cr.get('rc', 0)} read(s) consumed. "
+                            f"Set crumble({vn})!r=<count>; to silence this.",
+                            file=__import__("sys").stderr,
+                        )
                 elif (
-                    cr.get("wmax") is not None
-                    and cr["wc"] == cr["wmax"]
+                    _wmax is not None
+                    and cr["wc"] == _wmax
                     and not cr.get("owned")
                     and isinstance(stmt.expr, Call)
                 ):
@@ -4123,6 +4186,13 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     cr["owned"] = False
                     owned_vars.discard(vn)
                     handled_write_exhaustion_new_alloc = True
+                    if _rmax is None:
+                        print(
+                            f"[Bhumi] Warning: crumble '{vn}' autofreed (new-alloc path) after {_wmax} write(s); "
+                            f"no read limit (!r) was set, {cr.get('rc', 0)} read(s) consumed. "
+                            f"Set crumble({vn})!r=<count>; to silence this.",
+                            file=__import__("sys").stderr,
+                        )
             curfn = globals().get("__bhumi_current_codegen_fn", None)
             if curfn is not None and getattr(curfn, "is_vasync", False):
                 cap = getattr(curfn, "_vasync_captured", set()) or set()
@@ -4149,6 +4219,15 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     owned_vars.add(vn)
                     if vn in crumb_runtime:
                         crumb_runtime[vn]["owned"] = True
+            elif isinstance(stmt.expr, Var) and llvm_ty.endswith("*"):
+                _src_vn2 = stmt.expr.name
+                if _src_vn2 in owned_vars:
+                    owned_vars.discard(_src_vn2)
+                    owned_vars.add(vn)
+                    if vn in crumb_runtime:
+                        crumb_runtime[vn]["owned"] = True
+                    if _src_vn2 in crumb_runtime:
+                        crumb_runtime[_src_vn2]["owned"] = False
     elif isinstance(stmt, ContinueStmt):
         if not loop_stack:
             bhumi_report_error(None, None, "`continue` used outside of a loop")
@@ -4211,59 +4290,108 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         )
         out.append(f"  store {base_ty} {val}, {base_ty}* {ptr_tmp}")
     elif isinstance(stmt, AutoRegion):
+        def _collect_autoregion_decls(body):
+            names = set()
+            def _walk(stmts):
+                if stmts is None:
+                    return
+                for _s in stmts:
+                    if isinstance(_s, VarDecl):
+                        names.add(_s.name)
+                    if isinstance(_s, IfStmt):
+                        _walk(_s.then_body)
+                        if isinstance(_s.else_body, list):
+                            _walk(_s.else_body)
+                        elif isinstance(_s.else_body, IfStmt):
+                            _walk([_s.else_body])
+                    elif isinstance(_s, WhileStmt):
+                        _walk(_s.body)
+                    elif isinstance(_s, Match):
+                        for _case in (_s.cases or []):
+                            if _case.binding is not None:
+                                names.add(_case.binding)
+                            _walk(_case.body)
+                    elif isinstance(_s, AutoRegion):
+                        pass
+            _walk(body)
+            return names
+        body_decl_names = _collect_autoregion_decls(stmt.body)
+        pre_owned_snapshot = set(owned_vars)
         symbol_table.push()
+        scope_index = len(symbol_table.scopes) - 1
         ctx = {
-            "scope_snapshot": dict(symbol_table.scopes[-1]),
+            "scope_index": scope_index,
+            "body_decl_names": body_decl_names,
+            "pre_owned_snapshot": pre_owned_snapshot,
             "except": set(stmt.except_vars),
         }
         autoregion_stack.append(ctx)
         for s in stmt.body:
             gen_stmt(s, out, ret_ty)
-        scope_snapshot = ctx.get("scope_snapshot", {})
-        names_in_scope = list(scope_snapshot.keys())
-        for nm in names_in_scope:
-            if nm in ctx["except"]:
+        candidates = set(body_decl_names)
+        for _vn in list(owned_vars):
+            if _vn not in pre_owned_snapshot:
+                candidates.add(_vn)
+        exset = ctx["except"]
+        import sys as _sys
+        for nm in candidates:
+            if nm in exset:
                 continue
             cr = crumb_runtime.get(nm)
             owned_here = (nm in owned_vars) or (cr is not None and cr.get("owned"))
             if not owned_here:
                 continue
-            try:
-                llvm_ty, llvm_name = scope_snapshot[nm]
-            except Exception:
+            result = symbol_table.lookup(nm)
+            if result is None:
                 continue
-            if not (
-                isinstance(llvm_name, str)
-                and (
-                    llvm_name.startswith("@")
-                    or llvm_name in (val[1] for val in scope_snapshot.values())
-                )
-            ):
-                continue
+            llvm_ty, llvm_name = result
             if not llvm_ty.endswith("*"):
                 continue
+            if cr is not None:
+                _rmax_v = cr.get("rmax")
+                _wmax_v = cr.get("wmax")
+                _rc_v = cr.get("rc", 0)
+                _wc_v = cr.get("wc", 0)
+                if _rmax_v is None and _wmax_v is None:
+                    print(
+                        f"[Bhumi] Warning: crumble '{nm}' freed by autoregion; "
+                        f"no read (!r) or write (!w) limit was set, "
+                        f"{_rc_v} read(s) and {_wc_v} write(s) consumed. "
+                        f"Set crumble({nm})!r=<N>!w=<M>; to silence this.",
+                        file=_sys.stderr,
+                    )
+                elif _rmax_v is None:
+                    print(
+                        f"[Bhumi] Warning: crumble '{nm}' freed by autoregion; "
+                        f"no read limit (!r) was set, {_rc_v} read(s) consumed. "
+                        f"Set crumble({nm})!r=<count>; to silence this.",
+                        file=_sys.stderr,
+                    )
+                elif _wmax_v is None:
+                    print(
+                        f"[Bhumi] Warning: crumble '{nm}' freed by autoregion; "
+                        f"no write limit (!w) was set, {_wc_v} write(s) consumed. "
+                        f"Set crumble({nm})!w=<count>; to silence this.",
+                        file=_sys.stderr,
+                    )
+            addr_token = f"@{llvm_name}" if llvm_name.startswith("@") else f"%{llvm_name}_addr"
             ptr_tmp = new_tmp()
-            out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
+            out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
             cast_tmp = new_tmp()
             out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-            asize_tmp = new_tmp()
-            out.append(f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})")
-            is_zero_tmp = new_tmp()
-            out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
-            skip_lbl = new_label("free_skip")
-            do_lbl = new_label("do_free")
-            out.append(f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}")
-            out.append(f"{do_lbl}:")
-            cast_tmp2 = new_tmp()
-            out.append(f"  {cast_tmp2} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-            out.append(f"  call void @bhumi_free(i8* {cast_tmp2})")
-            out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
+            ar_skip_lbl = new_label("ar_skip")
+            ar_free_lbl = new_label("ar_free")
+            ar_null_tmp = new_tmp()
+            out.append(f"  {ar_null_tmp} = icmp eq i8* {cast_tmp}, null")
+            out.append(f"  br i1 {ar_null_tmp}, label %{ar_skip_lbl}, label %{ar_free_lbl}")
+            out.append(f"{ar_free_lbl}:")
+            out.append(f"  call void @bhumi_c_free(i8* {cast_tmp})")
+            out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+            out.append(f"  br label %{ar_skip_lbl}")
+            out.append(f"{ar_skip_lbl}:")
             if nm in crumb_runtime:
                 crumb_runtime[nm]["owned"] = False
-            if nm in owned_vars:
-                owned_vars.discard(nm)
-            out.append(f"  br label %{skip_lbl}")
-            out.append(f"{skip_lbl}:")
+            owned_vars.discard(nm)
         autoregion_stack.pop()
         symbol_table.pop()
         return
@@ -4333,13 +4461,16 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             dst_lang = llvm_to_lang(ret_ty)
             val = gen_expr(stmt.expr, out, expected=dst_lang)
         if autoregion_stack:
+            import sys as _sys
             for ctx in reversed(autoregion_stack):
-                scope_idx = ctx.get("scope_index")
-                if not isinstance(scope_idx, int):
-                    continue
                 exset = ctx.get("except", set())
-                names_in_scope = list(symbol_table.scopes[scope_idx].keys())
-                for nm in names_in_scope:
+                body_decl_names = ctx.get("body_decl_names", set())
+                pre_owned = ctx.get("pre_owned_snapshot", set())
+                candidates = set(body_decl_names)
+                for _vn2 in list(owned_vars):
+                    if _vn2 not in pre_owned:
+                        candidates.add(_vn2)
+                for nm in candidates:
                     if nm in exset:
                         continue
                     cr = crumb_runtime.get(nm)
@@ -4348,48 +4479,59 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     )
                     if not owned_here:
                         continue
-                    llvm_ty, llvm_name = symbol_table.lookup(nm)
-                    if not (
-                        isinstance(llvm_name, str)
-                        and (
-                            llvm_name.startswith("@")
-                            or any(
-                                val[1] == llvm_name
-                                for val in symbol_table.scopes[scope_idx].values()
-                            )
-                        )
-                    ):
+                    result = symbol_table.lookup(nm)
+                    if result is None:
                         continue
+                    llvm_ty, llvm_name = result
                     if not llvm_ty.endswith("*"):
                         continue
+                    if cr is not None:
+                        _rmax_v = cr.get("rmax")
+                        _wmax_v = cr.get("wmax")
+                        _rc_v = cr.get("rc", 0)
+                        _wc_v = cr.get("wc", 0)
+                        if _rmax_v is None and _wmax_v is None:
+                            print(
+                                f"[Bhumi] Warning: crumble '{nm}' freed by autoregion (on return); "
+                                f"no read (!r) or write (!w) limit was set, "
+                                f"{_rc_v} read(s) and {_wc_v} write(s) consumed. "
+                                f"Set crumble({nm})!r=<N>!w=<M>; to silence this.",
+                                file=_sys.stderr,
+                            )
+                        elif _rmax_v is None:
+                            print(
+                                f"[Bhumi] Warning: crumble '{nm}' freed by autoregion (on return); "
+                                f"no read limit (!r) was set, {_rc_v} read(s) consumed. "
+                                f"Set crumble({nm})!r=<count>; to silence this.",
+                                file=_sys.stderr,
+                            )
+                        elif _wmax_v is None:
+                            print(
+                                f"[Bhumi] Warning: crumble '{nm}' freed by autoregion (on return); "
+                                f"no write limit (!w) was set, {_wc_v} write(s) consumed. "
+                                f"Set crumble({nm})!w=<count>; to silence this.",
+                                file=_sys.stderr,
+                            )
+                    addr_token = f"@{llvm_name}" if llvm_name.startswith("@") else f"%{llvm_name}_addr"
                     ptr_tmp = new_tmp()
                     out.append(
-                        f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr"
+                        f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}"
                     )
                     cast_tmp = new_tmp()
                     out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-                    asize_tmp = new_tmp()
-                    out.append(
-                        f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})"
-                    )
-                    is_zero_tmp = new_tmp()
-                    out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
-                    skip_lbl = new_label("free_skip")
-                    do_lbl = new_label("do_free")
-                    out.append(
-                        f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}"
-                    )
-                    out.append(f"{do_lbl}:")
-                    cast_tmp = new_tmp()
-                    out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-                    out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
-                    out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
+                    ret_ar_skip = new_label("ret_ar_skip")
+                    ret_ar_free = new_label("ret_ar_free")
+                    ret_ar_null = new_tmp()
+                    out.append(f"  {ret_ar_null} = icmp eq i8* {cast_tmp}, null")
+                    out.append(f"  br i1 {ret_ar_null}, label %{ret_ar_skip}, label %{ret_ar_free}")
+                    out.append(f"{ret_ar_free}:")
+                    out.append(f"  call void @bhumi_c_free(i8* {cast_tmp})")
+                    out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+                    out.append(f"  br label %{ret_ar_skip}")
+                    out.append(f"{ret_ar_skip}:")
                     if nm in crumb_runtime:
                         crumb_runtime[nm]["owned"] = False
-                    if nm in owned_vars:
-                        owned_vars.discard(nm)
-                    out.append(f"  br label %{skip_lbl}")
-                    out.append(f"{skip_lbl}:")
+                    owned_vars.discard(nm)
         if val:
             src_lang = infer_type(stmt.expr)
             dst_lang = llvm_to_lang(ret_ty)
@@ -4423,28 +4565,38 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 getattr(stmt, "col", None),
                 f"Cannot forget non-pointer type '{llvm_ty}'",
             )
+        addr_token = f"@{llvm_name}" if llvm_name.startswith("@") else f"%{llvm_name}_addr"
         ptr_tmp = new_tmp()
-        out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* %{llvm_name}_addr")
+        out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
         cast_tmp = new_tmp()
         out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+        skip_lbl       = new_label("free_skip")
+        try_free_lbl   = new_label("try_free")
+        null_tmp = new_tmp()
+        out.append(f"  {null_tmp} = icmp eq i8* {cast_tmp}, null")
+        out.append(f"  br i1 {null_tmp}, label %{skip_lbl}, label %{try_free_lbl}")
+        out.append(f"{try_free_lbl}:")
         asize_tmp = new_tmp()
         out.append(f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})")
-        is_zero_tmp = new_tmp()
-        out.append(f"  {is_zero_tmp} = icmp eq i64 {asize_tmp}, 0")
-        skip_lbl = new_label("free_skip")
-        do_lbl = new_label("do_free")
-        out.append(f"  br i1 {is_zero_tmp}, label %{skip_lbl}, label %{do_lbl}")
-        out.append(f"{do_lbl}:")
-        cast_tmp = new_tmp()
-        out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+        is_bhumi_tmp = new_tmp()
+        out.append(f"  {is_bhumi_tmp} = icmp ne i64 {asize_tmp}, 0")
+        bhumi_free_lbl = new_label("do_bhumi_free")
+        c_free_lbl     = new_label("do_c_free")
+        out.append(f"  br i1 {is_bhumi_tmp}, label %{bhumi_free_lbl}, label %{c_free_lbl}")
+        out.append(f"{bhumi_free_lbl}:")
         out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
-        out.append(f"  store {llvm_ty} null, {llvm_ty}* %{llvm_name}_addr")
-        if stmt.varname in crumb_runtime:
-            crumb_runtime[stmt.varname]["owned"] = False
-        if stmt.varname in owned_vars:
-            owned_vars.discard(stmt.varname)
+        null_store_lbl = new_label("do_null_store")
+        out.append(f"  br label %{null_store_lbl}")
+        out.append(f"{c_free_lbl}:")
+        out.append(f"  call void @bhumi_c_free(i8* {cast_tmp})")
+        out.append(f"  br label %{null_store_lbl}")
+        out.append(f"{null_store_lbl}:")
+        out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
         out.append(f"  br label %{skip_lbl}")
         out.append(f"{skip_lbl}:")
+        if stmt.varname in crumb_runtime:
+            crumb_runtime[stmt.varname]["owned"] = False
+        owned_vars.discard(stmt.varname)
     elif isinstance(stmt, Match):
         raw_ty = infer_type(stmt.expr)
         if isinstance(stmt.expr, Var):
@@ -4565,16 +4717,20 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         for idx, (vname, _) in enumerate(enum_variant_map[enum_name]):
             out.append(f"	i32 {idx}, label %{variant_labels[vname]}")
         out.append("  ]")
-        def gen_nested_match_case(case, outer_enum_name, outer_enum_ptr, outer_payload_val, outer_payload_type, arm_end_lbl, out, ret_ty):
+        def gen_nested_match_case(case, outer_enum_name, outer_enum_ptr, outer_payload_val, outer_payload_type, arm_end_lbl, out, ret_ty, outer_enum_ptr_owned=False):
             if case.nested_pattern is None:
                 if outer_payload_val is not None and case.binding is not None:
                     llvm_payload_ty = llvm_ty_of(outer_payload_type)
                     binding_ir = f"{case.binding}_{new_tmp().lstrip('%')}"
-                    out.append(f"  %{binding_ir}_addr = alloca {llvm_payload_ty}")
+                    _entry_alloca_buf.append(f"  %{binding_ir}_addr = alloca {llvm_payload_ty}")
+                    if llvm_payload_ty.endswith("*"):
+                        _entry_alloca_buf.append(f"  store {llvm_payload_ty} null, {llvm_payload_ty}* %{binding_ir}_addr")
                     out.append(
                         f"  store {llvm_payload_ty} {outer_payload_val}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
                     symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
+                    if llvm_payload_ty.endswith("*") and outer_enum_ptr_owned:
+                        owned_vars.add(case.binding)
                 for s in case.body:
                     gen_stmt(s, out, ret_ty)
                 last = out[-1].strip() if out else ""
@@ -4728,16 +4884,25 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 )
                 if case.nested_pattern is None and case.binding is not None:
                     binding_ir = f"{case.binding}_{new_tmp().lstrip('%')}"
-                    out.append(f"  %{binding_ir}_addr = alloca {llvm_payload_ty}")
+                    _entry_alloca_buf.append(f"  %{binding_ir}_addr = alloca {llvm_payload_ty}")
+                    if llvm_payload_ty.endswith("*"):
+                        _entry_alloca_buf.append(f"  store {llvm_payload_ty} null, {llvm_payload_ty}* %{binding_ir}_addr")
                     out.append(
                         f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
                     symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
+                    _match_subj_owned = False
+                    if isinstance(stmt.expr, Var):
+                        _match_subj_owned = stmt.expr.name in owned_vars
+                    if llvm_payload_ty.endswith("*") and _match_subj_owned:
+                        owned_vars.add(case.binding)
             if case.nested_pattern is not None:
+                _subj_owned_nested = isinstance(stmt.expr, Var) and stmt.expr.name in owned_vars
                 gen_nested_match_case(
                     case, enum_name, enum_ptr,
                     loaded_payload, payload_type,
-                    end_lbl, out, ret_ty
+                    end_lbl, out, ret_ty,
+                    outer_enum_ptr_owned=_subj_owned_nested
                 )
             else:
                 for s in case.body:
@@ -4772,6 +4937,9 @@ def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
             f"Did you mean '{base}<{needed}>'?"
         )
 def gen_func(fn: Func) -> List[str]:
+    crumb_runtime.clear()
+    owned_vars.clear()
+    _entry_alloca_buf.clear()
     if fn.type_params:
         return []
     if fn.ret_type == "#":
@@ -4906,6 +5074,7 @@ def gen_func(fn: Func) -> List[str]:
                         f"  store {llvm_ty} zeroinitializer, {llvm_ty}* %{stmt.name}_addr"
                     )
                 symbol_table.declare(stmt.name, llvm_ty, stmt.name)
+    entry_insert_pos = len(out)
     has_return = False
     for stmt in fn.body or []:
         if isinstance(stmt, ReturnStmt):
@@ -4914,6 +5083,10 @@ def gen_func(fn: Func) -> List[str]:
             break
         else:
             gen_stmt(stmt, out, ret_ty)
+    if _entry_alloca_buf:
+        for i, line in enumerate(_entry_alloca_buf):
+            out.insert(entry_insert_pos + i, line)
+        _entry_alloca_buf.clear()
     if not has_return:
         if ret_ty == "void":
             out.append("  ret void")
@@ -5287,6 +5460,10 @@ def compile_program(prog: Program) -> str:
     func_table["exit"] = "void"
     func_table["malloc"] = "i8*"
     func_table["free"] = "void"
+    func_table["bhumi_c_free"] = "void"
+    func_table["bhumi_tbl_insert"] = "void"
+    func_table["bhumi_tbl_remove"] = "void"
+    func_table["bhumi_tbl_contains"] = "i1"
     func_table["puts"] = "i32"
     func_table["strlen"] = "i64"
     func_table["bhumi_argc"] = "i64"
@@ -5344,6 +5521,206 @@ entry:
   store i64 %xor_magic, i64* @.alloc_magic
   ret void
 }
+; Side table: open-addressing hash set of bhumi-owned user pointers.
+; Heap-allocated, power-of-2 capacity, auto-resizes at 75% load.
+; null = empty slot. Linear probing.
+@.bhumi_tbl_ptr = global i8** null
+@.bhumi_tbl_cap = global i64 0
+@.bhumi_tbl_cnt = global i64 0
+; Raw insert into an arbitrary slot array, no resize, no count bump. Used by rehash.
+define void @bhumi_tbl_raw_insert(i8** %slots, i64 %cap, i8* %ptr) {
+entry:
+  %mask = sub i64 %cap, 1
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %probe
+probe:
+  %slot = phi i64 [ %hash, %entry ], [ %next_wrap, %occupied ]
+  %ep = getelementptr i8*, i8** %slots, i64 %slot
+  %cur = load i8*, i8** %ep
+  %is_empty = icmp eq i8* %cur, null
+  br i1 %is_empty, label %do_store, label %occupied
+occupied:
+  %next = add i64 %slot, 1
+  %next_wrap = and i64 %next, %mask
+  br label %probe
+do_store:
+  store i8* %ptr, i8** %ep
+  ret void
+}
+; Grow table to newcap (must be power of 2), rehash all live entries, free old array.
+define void @bhumi_tbl_grow(i64 %newcap) {
+entry:
+  %nbytes = mul i64 %newcap, 8
+  %raw = call i8* @malloc(i64 %nbytes)
+  %new_slots = bitcast i8* %raw to i8**
+  br label %zero_loop
+zero_loop:
+  %zi = phi i64 [ 0, %entry ], [ %zi_next, %zero_loop ]
+  %zep = getelementptr i8*, i8** %new_slots, i64 %zi
+  store i8* null, i8** %zep
+  %zi_next = add i64 %zi, 1
+  %zi_done = icmp eq i64 %zi_next, %newcap
+  br i1 %zi_done, label %rehash, label %zero_loop
+rehash:
+  %old_slots = load i8**, i8*** @.bhumi_tbl_ptr
+  %old_cap   = load i64, i64* @.bhumi_tbl_cap
+  %old_null  = icmp eq i8** %old_slots, null
+  br i1 %old_null, label %rehash_done, label %rehash_loop
+rehash_loop:
+  %ri = phi i64 [ 0, %rehash ], [ %ri_next, %rehash_cont ]
+  %rep = getelementptr i8*, i8** %old_slots, i64 %ri
+  %rval = load i8*, i8** %rep
+  %r_empty = icmp eq i8* %rval, null
+  br i1 %r_empty, label %rehash_cont, label %do_reinsert
+do_reinsert:
+  call void @bhumi_tbl_raw_insert(i8** %new_slots, i64 %newcap, i8* %rval)
+  br label %rehash_cont
+rehash_cont:
+  %ri_next = add i64 %ri, 1
+  %ri_done = icmp eq i64 %ri_next, %old_cap
+  br i1 %ri_done, label %free_old, label %rehash_loop
+free_old:
+  %old_raw = bitcast i8** %old_slots to i8*
+  call void @free(i8* %old_raw)
+  br label %rehash_done
+rehash_done:
+  store i8** %new_slots, i8*** @.bhumi_tbl_ptr
+  store i64 %newcap,     i64*  @.bhumi_tbl_cap
+  ret void
+}
+; Lazy init to 64 slots on first use.
+define void @bhumi_tbl_ensure_init() {
+entry:
+  %cap = load i64, i64* @.bhumi_tbl_cap
+  %need_init = icmp eq i64 %cap, 0
+  br i1 %need_init, label %do_init, label %done
+do_init:
+  call void @bhumi_tbl_grow(i64 64)
+  br label %done
+done:
+  ret void
+}
+; Insert a pointer into the side table (called by bhumi_malloc).
+define void @bhumi_tbl_insert(i8* %ptr) {
+entry:
+  call void @bhumi_tbl_ensure_init()
+  %cnt = load i64, i64* @.bhumi_tbl_cnt
+  %cap = load i64, i64* @.bhumi_tbl_cap
+  %cnt4 = mul i64 %cnt, 4
+  %cap3 = mul i64 %cap, 3
+  %overload = icmp uge i64 %cnt4, %cap3
+  br i1 %overload, label %do_grow, label %do_insert
+do_grow:
+  %newcap = mul i64 %cap, 2
+  call void @bhumi_tbl_grow(i64 %newcap)
+  br label %do_insert
+do_insert:
+  %slots = load i8**, i8*** @.bhumi_tbl_ptr
+  %cap2  = load i64, i64* @.bhumi_tbl_cap
+  call void @bhumi_tbl_raw_insert(i8** %slots, i64 %cap2, i8* %ptr)
+  %cnt2 = load i64, i64* @.bhumi_tbl_cnt
+  %cnt3 = add i64 %cnt2, 1
+  store i64 %cnt3, i64* @.bhumi_tbl_cnt
+  ret void
+}
+; Remove a pointer from the side table (called by bhumi_free).
+; Uses backward-shift deletion to keep probing chains intact.
+define void @bhumi_tbl_remove(i8* %ptr) {
+entry:
+  %cap = load i64, i64* @.bhumi_tbl_cap
+  %is_empty_tbl = icmp eq i64 %cap, 0
+  br i1 %is_empty_tbl, label %not_found, label %do_remove
+do_remove:
+  %mask = sub i64 %cap, 1
+  %slots = load i8**, i8*** @.bhumi_tbl_ptr
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %find_loop
+find_loop:
+  ; feed %fwrap (masked) back, not raw %fnext
+  %fi = phi i64 [ %hash, %do_remove ], [ %fwrap, %find_cont ]
+  %fep = getelementptr i8*, i8** %slots, i64 %fi
+  %fcur = load i8*, i8** %fep
+  %is_null = icmp eq i8* %fcur, null
+  br i1 %is_null, label %not_found, label %check_match
+check_match:
+  %match = icmp eq i8* %fcur, %ptr
+  br i1 %match, label %found, label %find_cont
+find_cont:
+  %fnext = add i64 %fi, 1
+  %fwrap = and i64 %fnext, %mask
+  br label %find_loop
+found:
+  store i8* null, i8** %fep
+  %shift_start = add i64 %fi, 1
+  %shift_wrap = and i64 %shift_start, %mask
+  br label %shift_loop
+shift_loop:
+  ; predecessor is %shift_cont (where %snext_wrap is defined), not %do_shift
+  %si = phi i64 [ %shift_wrap, %found ], [ %snext_wrap, %shift_cont ]
+  %sep = getelementptr i8*, i8** %slots, i64 %si
+  %scur = load i8*, i8** %sep
+  %s_empty = icmp eq i8* %scur, null
+  br i1 %s_empty, label %shift_done, label %do_shift
+do_shift:
+  %prev_si = sub i64 %si, 1
+  %prev_si_wrap = and i64 %prev_si, %mask
+  %prev_ep = getelementptr i8*, i8** %slots, i64 %prev_si_wrap
+  %prev_val = load i8*, i8** %prev_ep
+  %prev_empty = icmp eq i8* %prev_val, null
+  br i1 %prev_empty, label %can_shift, label %no_shift
+can_shift:
+  store i8* %scur, i8** %prev_ep
+  store i8* null, i8** %sep
+  br label %shift_cont
+no_shift:
+  br label %shift_cont
+shift_cont:
+  %snext = add i64 %si, 1
+  %snext_wrap = and i64 %snext, %mask
+  br label %shift_loop
+shift_done:
+  %cnt_r = load i64, i64* @.bhumi_tbl_cnt
+  %cnt_r1 = sub i64 %cnt_r, 1
+  store i64 %cnt_r1, i64* @.bhumi_tbl_cnt
+  ret void
+not_found:
+  ret void
+}
+; Check if a pointer is in the side table (1 = bhumi-owned, 0 = not).
+define i1 @bhumi_tbl_contains(i8* %ptr) {
+entry:
+  %is_null = icmp eq i8* %ptr, null
+  br i1 %is_null, label %ret_false, label %check_init
+check_init:
+  %cap = load i64, i64* @.bhumi_tbl_cap
+  %no_cap = icmp eq i64 %cap, 0
+  br i1 %no_cap, label %ret_false, label %do_probe
+do_probe:
+  %mask = sub i64 %cap, 1
+  %slots = load i8**, i8*** @.bhumi_tbl_ptr
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %probe
+probe:
+  %slot = phi i64 [ %hash, %do_probe ], [ %next_wrap, %cont ]
+  %ep = getelementptr i8*, i8** %slots, i64 %slot
+  %cur = load i8*, i8** %ep
+  %is_empty = icmp eq i8* %cur, null
+  br i1 %is_empty, label %ret_false, label %check_match
+check_match:
+  %match = icmp eq i8* %cur, %ptr
+  br i1 %match, label %ret_true, label %cont
+cont:
+  %next = add i64 %slot, 1
+  %next_wrap = and i64 %next, %mask
+  br label %probe
+ret_true:
+  ret i1 1
+ret_false:
+  ret i1 0
+}
 define i8* @bhumi_malloc(i64 %usize) {
 entry:
   %hdr_sz = add i64 %usize, 24
@@ -5372,72 +5749,74 @@ ok_alloc:
   %footer_ptr = getelementptr i8, i8* %user_ptr, i64 %usize
   %footer_ptr_i64 = bitcast i8* %footer_ptr to i64*
   store i64 %global_magic, i64* %footer_ptr_i64
+  ; Register in side table so bhumi_alloc_size/bhumi_free never speculatively
+  ; read ptr-16 on non-bhumi pointers.
+  call void @bhumi_tbl_insert(i8* %user_ptr)
   ret i8* %user_ptr
 }
 define void @bhumi_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %ret_void, label %check_hdr
-check_hdr:
-  %raw_hdr = getelementptr i8, i8* %userptr, i64 -16
-  %hdr_i64 = bitcast i8* %raw_hdr to i64*
-  %magic = load i64, i64* %hdr_i64
-  %global_magic_cmp = load i64, i64* @.alloc_magic
-  %ok = icmp eq i64 %magic, %global_magic_cmp
-  br i1 %ok, label %free_ok, label %free_fail
+  br i1 %is_null, label %ret_void, label %check_tbl
+check_tbl:
+  ; Side-table lookup, safe, no speculative ptr-16 read on C pointers.
+  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
+  br i1 %is_bhumi, label %free_ok, label %free_fail
 free_fail:
   %tmp_puts2 = call i32 @puts(i8* getelementptr inbounds ([67 x i8], [67 x i8]* @.heap_msg, i32 0, i32 0))
   call void @exit(i32 1)
   unreachable
 free_ok:
+  call void @bhumi_tbl_remove(i8* %userptr)
+  %raw_hdr = getelementptr i8, i8* %userptr, i64 -16
+  %hdr_i64 = bitcast i8* %raw_hdr to i64*
   %size_slot = getelementptr i8, i8* %raw_hdr, i64 8
   %size_i64 = bitcast i8* %size_slot to i64*
-  %sz = load i64, i64* %size_i64
-  %is_neg = icmp slt i64 %sz, 0
-  br i1 %is_neg, label %free_fail, label %check_footer
-check_footer:
-  %footer_loc = getelementptr i8, i8* %userptr, i64 %sz
-  %footer_i64 = bitcast i8* %footer_loc to i64*
-  %footer_val = load i64, i64* %footer_i64
-  %ok2 = icmp eq i64 %footer_val, %global_magic_cmp
-  br i1 %ok2, label %free_ok2, label %free_fail
-free_ok2:
+  ; Poison only the header fields (magic + size), both live inside our own
+  ; allocation.  Do NOT touch the footer: it sits at userptr+sz which overlaps
+  ; the next glibc chunk's prev_size field and would corrupt the heap.
   store i64 0, i64* %hdr_i64
-  store i64 0, i64* %footer_i64
-  %rawptr = bitcast i8* %raw_hdr to i8*
-  call void @free(i8* %rawptr)
+  store i64 0, i64* %size_i64
+  call void @free(i8* %raw_hdr)
   ret void
 ret_void:
   ret void
 }
 @.vvolatile_msg = private unnamed_addr constant [69 x i8] c"[BhumiCompiler-RT-CHCK]: Volatile write attempted in vasync (panic).\\00"
+define void @bhumi_c_free(i8* %userptr) nounwind {
+entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %check_tbl
+check_tbl:
+  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
+  br i1 %is_bhumi, label %is_bhumi_lbl, label %is_c_alloc
+is_bhumi_lbl:
+  call void @bhumi_free(i8* %userptr)
+  br label %done
+is_c_alloc:
+  call void @free(i8* %userptr)
+  br label %done
+done:
+  ret void
+}
 define void @bhumi_vvolatile_abort() {
 entry:
   %tmp_puts_vv = call i32 @puts(i8* getelementptr inbounds ([69 x i8], [69 x i8]* @.vvolatile_msg, i32 0, i32 0))
   call void @exit(i32 1)
   unreachable
 }
-define i64 @bhumi_alloc_size(i8* %userptr) readonly nounwind willreturn {
+define i64 @bhumi_alloc_size(i8* %userptr) nounwind willreturn {
 entry:
   %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %ret_zero, label %cont
-cont:
+  br i1 %is_null, label %ret_zero, label %check_tbl
+check_tbl:
+  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
+  br i1 %is_bhumi, label %read_hdr, label %ret_zero
+read_hdr:
   %raw_hdr = getelementptr i8, i8* %userptr, i64 -16
-  %hdr_i64 = bitcast i8* %raw_hdr to i64*
-  %magic = load i64, i64* %hdr_i64
-  %global_magic_cmp = load i64, i64* @.alloc_magic
-  %ok = icmp eq i64 %magic, %global_magic_cmp
-  br i1 %ok, label %ok2, label %ret_zero
-ok2:
   %size_slot = getelementptr i8, i8* %raw_hdr, i64 8
   %size_i64 = bitcast i8* %size_slot to i64*
   %sz = load i64, i64* %size_i64
-  %footer_loc = getelementptr i8, i8* %userptr, i64 %sz
-  %footer_i64 = bitcast i8* %footer_loc to i64*
-  %footer_val = load i64, i64* %footer_i64
-  %ok_footer = icmp eq i64 %footer_val, %global_magic_cmp
-  br i1 %ok_footer, label %ret_sz, label %ret_zero
-ret_sz:
   ret i64 %sz
 ret_zero:
   ret i64 0
@@ -5574,6 +5953,16 @@ entry:
 define void @bhumi_free(i8* %userptr) {
 entry:
   call void @free(i8* %userptr)
+  ret void
+}
+define void @bhumi_c_free(i8* %userptr) {
+entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %do_free
+do_free:
+  call void @free(i8* %userptr)
+  br label %done
+done:
   ret void
 }
 define i64 @bhumi_alloc_size(i8* %userptr) {
@@ -7866,6 +8255,9 @@ def main():
         func_table[_fn.name] = llvm_ty_of(_fn.ret_type)
     func_table.update({
         "exit": "void", "malloc": "i8*", "free": "void",
+        "bhumi_c_free": "void",
+        "bhumi_tbl_insert": "void", "bhumi_tbl_remove": "void",
+        "bhumi_tbl_contains": "i1",
         "puts": "i32", "strlen": "i64",
         "bhumi_argc": "i64", "bhumi_argv": "i8*",
     })
