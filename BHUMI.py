@@ -1383,17 +1383,10 @@ class Parser:
                     "Enum variant names cannot contain '__mono__'.",
                 )
             variant_type: Optional[str] = None
-            if self.peek().kind == "COLON":
-                self.bump()
-                variant_type = self.parse_type()
-                self.expect("SEMI")
-            elif self.peek().kind == "LPAREN":
+            if self.peek().kind == "LPAREN":
                 self.bump()
                 variant_type = self.parse_type()
                 self.expect("RPAREN")
-                self.expect("SEMI")
-            elif self.peek().kind in TYPE_TOKENS or self.peek().kind == "IDENT" or self.peek().kind == "AMP":
-                variant_type = self.parse_type()
                 self.expect("SEMI")
             else:
                 self.expect("SEMI")
@@ -1799,7 +1792,6 @@ class Parser:
         cases: List[MatchCase] = []
         while self.peek().kind != "RBRACE":
             case = self._parse_match_case()
-            self.expect("COLON")
             self.expect("LBRACE")
             body_stmts: List[Stmt] = []
             while self.peek().kind != "RBRACE":
@@ -8235,6 +8227,24 @@ def main():
                 f"Duplicate function definition: '{fn.name}', remove or rename the duplicate.",
             )
         seen_names[fn.name] = idx
+    seen_enum_names = {}
+    for idx, en in enumerate(final_prog.enums):
+        if en.name in seen_enum_names:
+            bhumi_report_error(
+                None,
+                None,
+                f"Duplicate enum definition: '{en.name}', remove or rename the duplicate.",
+            )
+        seen_enum_names[en.name] = idx
+    seen_struct_names = {}
+    for idx, st in enumerate(final_prog.structs):
+        if st.name in seen_struct_names:
+            bhumi_report_error(
+                None,
+                None,
+                f"Duplicate struct definition: '{st.name}', remove or rename the duplicate.",
+            )
+        seen_struct_names[st.name] = idx
     has_main = any(fn.name == "main" for fn in final_prog.funcs)
     if not has_main and not no_main:
         bhumi_report_error(
