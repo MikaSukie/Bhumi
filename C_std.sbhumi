@@ -157,12 +157,14 @@ pub extern fn Uget_string(int h)   <string>;
 
 pub extern fn Ufree_union(int h)     <void>;
 
+fn empty() <string> { return""; }
+
 enum Exist<T> {
   None;
-  Some: T;
+  Some(T);
 }
 
 enum Respond<T, E> { 
-    Ok: T;
-    Err: E;
+    Ok(T);
+    Err(E);
 }
