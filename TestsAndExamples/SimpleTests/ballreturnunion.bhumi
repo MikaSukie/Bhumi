@@ -1,0 +1,40 @@
+import C_std;
+
+fn main() <void> {
+    Exist<string> thepath = Exist->Some(input("file path?: "));
+    match (thepath) {
+        Some(contents): {
+            printnl("path is: " + contents);
+        }
+        None: {
+            printnl("Null err");
+        }
+    }
+    Respond<string, string> infile = try_read_file(thepath);
+    match (infile) {
+        Ok(contents): {
+            printnl(contents);
+        }
+        Err(e): {
+            printnl(e);
+        }
+    }
+}
+
+pub fn try_read_file(Exist<string> path) <Respond<string, string>> {
+    match (path) {
+        Some(p): {
+            if (file_exists(p)) {
+                return Ok(read_file(p));
+            } else {
+                return Err("Error reading file");
+            }
+        }
+        None: {
+            return Err("No path given");
+        }
+    }
+}
+
+pub extern fn read_file(string path) <string>;
+pub extern fn file_exists(string path) <bool>;
