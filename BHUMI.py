@@ -249,14 +249,8 @@ def ensure_monomorph_for_call(
     else:
         mononame = base_name
     if mononame not in func_table:
-        base_fn = next(
-            (
-                f
-                for f in all_funcs
-                if f.name == base_name and (f.type_params or f.ret_type == "#")
-            ),
-            None,
-        )
+        _candidate = _func_name_map.get(base_name)
+        base_fn = _candidate if _candidate and (_candidate.type_params or _candidate.ret_type == "#") else None
         if base_fn is None:
             bhumi_report_error(
                 None, None, f"Attempted to monomorph unknown function '{base_name}'"
@@ -345,7 +339,7 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
 def ensure_monomorph_call(
     call_expr: "Call", out: List[str], expected_ret: Optional[str] = None
 ) -> str:
-    base_fn = next((f for f in all_funcs if f.name == call_expr.name), None)
+    base_fn = _func_name_map.get(call_expr.name)
     if base_fn and base_fn.ret_type == "#":
         if expected_ret is None:
             bhumi_report_error(
@@ -574,6 +568,7 @@ def ensure_monomorph_call(
         base_fn.is_async,
     )
     all_funcs.append(new_fn)
+    _func_name_map[new_fn.name] = new_fn
     if new_ret == "#":
         bhumi_report_error(
             None,
@@ -621,6 +616,7 @@ def ensure_monomorph_call(
         func_table.pop(mononame, None)
         try:
             all_funcs.remove(new_fn)
+            _func_name_map.pop(new_fn.name, None)
         except ValueError:
             pass
         bhumi_report_error(
@@ -1165,6 +1161,7 @@ string_constants: List[str] = []
 struct_field_map: Dict[str, List[Tuple[str, str]]] = {}
 generated_mono: Dict[str, bool] = {}
 all_funcs: List[Func] = []
+_func_name_map: Dict[str, "Func"] = {}
 enum_variant_map: Dict[str, List[Tuple[str, Optional[str]]]] = {}
 loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
@@ -1172,6 +1169,7 @@ owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
 _entry_alloca_buf: List[str] = []
 _expr_type_cache: Dict[int, str] = {}
+_parse_cache: Dict[str, Any] = {}  # keyed by resolved_path -> parsed Program
 mono_map: Dict[str, str] = {}
 class Parser:
     def __init__(self, tokens: List[Token]):
@@ -2362,7 +2360,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         if isinstance(inner, Call):
             call_target = ensure_monomorph_call(inner, out)
             args_ir: List[str] = []
-            concrete_fn = next((f for f in all_funcs if f.name == call_target), None)
+            concrete_fn = _func_name_map.get(call_target)
             if concrete_fn:
                 for a, (param_typ, _) in zip(inner.args, concrete_fn.params):
                     tmpa = gen_expr(a, out)
@@ -2415,7 +2413,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  call void @bhumi_block_until_complete(i8* {handle_b_tmp})")
             out.append(f"  br label %{cont_lbl}")
             out.append(f"{cont_lbl}:")
-            base_fn = next((f for f in all_funcs if f.name == call_target), None)
+            base_fn = _func_name_map.get(call_target)
             ret_llvm = llvm_ty_of(base_fn.ret_type) if base_fn else "i64"
             res_ptr = new_tmp()
             out.append(
@@ -3021,10 +3019,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             _maybe_flush_deferred(expr.left, lhs)
             _maybe_flush_deferred(expr.right, rhs)
             return raw
-        common_t = unify_types(infer_type(expr.left), infer_type(expr.right))
+        lt = infer_type(expr.left)
+        rt = infer_type(expr.right)
+        common_t = unify_types(lt, rt)
         if common_t is None:
-            lt = infer_type(expr.left)
-            rt = infer_type(expr.right)
             bhumi_report_error(
                 None,
                 None,
@@ -3103,8 +3101,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             _maybe_flush_deferred(expr.left, lhs)
             _maybe_flush_deferred(expr.right, rhs)
             return tmp
-        lt = infer_type(expr.left)
-        rt = infer_type(expr.right)
         bhumi_report_error(
             None,
             None,
@@ -3377,7 +3373,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  {tmp} = xor i1 {arg}, true")
             return tmp
         call_target = ensure_monomorph_call(expr, out, expected_ret=expected)
-        concrete_fn = next((f for f in all_funcs if f.name == call_target), None)
+        concrete_fn = _func_name_map.get(call_target)
         if concrete_fn and concrete_fn.is_async:
             bhumi_report_error(
                 None, None, f"async function '{expr.name}' must be awaited"
@@ -3677,7 +3673,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         elem_llvm = llvm_ty_of(elem_t)
         arr_llvm_ty = f"[{count} x {elem_llvm}]"
         tmp_ptr = new_tmp()
-        _entry_alloca_buf.append(f"  {tmp_ptr} = alloca {arr_llvm_ty}")
+        out.append(f"  {tmp_ptr} = alloca {arr_llvm_ty}")
         for i, el in enumerate(expr.elements):
             val = gen_expr(el, out)
             gep = new_tmp()
@@ -3744,7 +3740,7 @@ def infer_type(expr: Expr) -> str:
     if isinstance(expr, AwaitExpr):
         inner = expr.expr
         if isinstance(inner, Call):
-            base_fn = next((f for f in all_funcs if f.name == inner.name), None)
+            base_fn = _func_name_map.get(inner.name)
             if base_fn is None:
                 bhumi_report_error(
                     getattr(inner, "lineno", None),
@@ -4077,7 +4073,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
                 if isinstance(stmt.expr, Call):
                     ret_t = infer_type(stmt.expr)
-                    _nown_callee = getattr(next((f for f in all_funcs if f.name == stmt.expr.name), None), "is_nown", False)
+                    _nown_callee = getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
                     if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee:
                         owned_vars.add(stmt.name)
                         if stmt.name in crumb_runtime:
@@ -4111,7 +4107,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
             if isinstance(stmt.expr, Call):
                 ret_t = infer_type(stmt.expr)
-                _nown_callee2 = getattr(next((f for f in all_funcs if f.name == stmt.expr.name), None), "is_nown", False)
+                _nown_callee2 = getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
                 if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee2:
                     owned_vars.add(stmt.name)
                     if stmt.name in crumb_runtime:
@@ -5182,7 +5178,7 @@ def annotate_types(prog: Program) -> None:
         if isinstance(expr, AwaitExpr):
             inner = expr.expr
             if isinstance(inner, Call):
-                base_fn = next((f for f in all_funcs if f.name == inner.name), None)
+                base_fn = _func_name_map.get(inner.name)
                 if base_fn is not None:
                     _ann_expr(inner)
                     return _cache(expr, base_fn.ret_type)
@@ -5301,7 +5297,7 @@ def annotate_types(prog: Program) -> None:
                 if type_map.get(chosen_enum, "").startswith("i") and chosen_payload is None:
                     return _cache(expr, chosen_enum)
                 return _cache(expr, chosen_enum + "*")
-            base_fn = next((f for f in all_funcs if f.name == expr.name), None)
+            base_fn = _func_name_map.get(expr.name)
             arg_expected: List[Optional[str]] = []
             if base_fn is not None and base_fn.params:
                 for (ptype, _) in base_fn.params:
@@ -5446,8 +5442,9 @@ def annotate_types(prog: Program) -> None:
             _ann_stmt(stmt, fn.ret_type)
         ann_env.pop()
 def compile_program(prog: Program) -> str:
-    global all_funcs, func_table, builtins_emitted
+    global all_funcs, func_table, builtins_emitted, _func_name_map
     all_funcs = prog.funcs[:]
+    _func_name_map = {f.name: f for f in all_funcs}
     string_constants.clear()
     func_table.clear()
     for fn in prog.funcs:
@@ -8146,6 +8143,7 @@ def main():
     global compiled
     compiled = args.input
     _expr_type_cache.clear()
+    _parse_cache.clear()
     with open(args.input, encoding="utf-8", errors="ignore") as f:
         src = f.read()
     tokens = lex(src)
@@ -8189,17 +8187,21 @@ def main():
             if resolved_path in seen_imports:
                 continue
             seen_imports.add(resolved_path)
-            with open(resolved_path, "r", encoding="utf-8", errors="ignore") as f:
-                imported_src = f.read()
-            global compiled
-            previous_compiled = compiled
-            compiled = resolved_path
-            try:
-                imported_tokens = lex(imported_src)
-                imported_parser = Parser(imported_tokens)
-                sub_prog = imported_parser.parse()
-            finally:
-                compiled = previous_compiled
+            if resolved_path in _parse_cache:
+                sub_prog = _parse_cache[resolved_path]
+            else:
+                with open(resolved_path, "r", encoding="utf-8", errors="ignore") as f:
+                    imported_src = f.read()
+                global compiled
+                previous_compiled = compiled
+                compiled = resolved_path
+                try:
+                    imported_tokens = lex(imported_src)
+                    imported_parser = Parser(imported_tokens)
+                    sub_prog = imported_parser.parse()
+                    _parse_cache[resolved_path] = sub_prog
+                finally:
+                    compiled = previous_compiled
             load_imports_recursively(
                 sub_prog, all_funcs, all_structs, all_enums, all_globals
             )
