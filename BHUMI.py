@@ -1169,7 +1169,7 @@ owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
 _entry_alloca_buf: List[str] = []
 _expr_type_cache: Dict[int, str] = {}
-_parse_cache: Dict[str, Any] = {}  # keyed by resolved_path -> parsed Program
+_parse_cache: Dict[str, Any] = {}
 mono_map: Dict[str, str] = {}
 class Parser:
     def __init__(self, tokens: List[Token]):
@@ -4598,7 +4598,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         if isinstance(stmt.expr, Var):
             _sym = symbol_table.lookup(stmt.expr.name)
             if _sym is not None:
-                _sym_llvm_ty = _sym[0]  # e.g. "%enum.Respond__mono__int_string*"
+                _sym_llvm_ty = _sym[0]
                 _sym_base = _sym_llvm_ty.rstrip("*")
                 if _sym_base.startswith("%enum."):
                     raw_ty = _sym_base[len("%enum."):] + "*"
@@ -5005,7 +5005,7 @@ def gen_func(fn: Func) -> List[str]:
             out.append(f"  store {llvm_ty} %{name}, {llvm_ty}* %{name}_addr")
             out.append(f"  %{name}_len = alloca i32")
             out.append(f"  store i32 {count}, i32* %{name}_len")
-            inner_ty = llvm_ty[:-1]  # strip trailing *
+            inner_ty = llvm_ty[:-1]
             symbol_table.declare(name, inner_ty, name)
         elif _unsized_arr:
             out.append(f"  %{name}_addr = alloca {llvm_ty}")
