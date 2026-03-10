@@ -1933,24 +1933,11 @@ class Parser:
         while True:
             op_token = self.peek()
             if op_token.kind in {
-                "PLUS",
-                "MINUS",
-                "STAR",
-                "SLASH",
-                "PERCENT",
-                "EQEQ",
-                "NEQ",
-                "LT",
-                "LE",
-                "GT",
-                "GE",
-                "AMP",
-                "PIPE",
-                "CARET",
-                "LSHIFT",
-                "RSHIFT",
-                "AND",
-                "OR",
+                "PLUS", "MINUS", "STAR", "SLASH",
+                "PERCENT", "EQEQ", "NEQ", "LT",
+                "LE", "GT", "GE", "AMP",
+                "PIPE", "CARET", "LSHIFT", "RSHIFT",
+                "AND", "OR",
             }:
                 op_prec = self.get_precedence(op_token.kind)
                 if op_prec < min_prec:
@@ -1970,33 +1957,17 @@ class Parser:
         return left
     def get_precedence(self, op: str) -> int:
         return {
-            "STAR": 9,
-            "SLASH": 9,
-            "PERCENT": 9,
-            "PLUS": 8,
-            "MINUS": 8,
-            "LSHIFT": 7,
-            "RSHIFT": 7,
-            "LT": 6,
-            "LE": 6,
-            "GT": 6,
-            "GE": 6,
-            "EQEQ": 5,
-            "NEQ": 5,
-            "AMP": 4,
-            "CARET": 3,
-            "PIPE": 2,
-            "AND": 1,
-            "OR": 0,
+            "STAR": 9, "SLASH": 9, "PERCENT": 9, "PLUS": 8,
+            "MINUS": 8, "LSHIFT": 7, "RSHIFT": 7, "LT": 6,
+            "LE": 6, "GT": 6, "GE": 6, "EQEQ": 5,
+            "NEQ": 5, "AMP": 4, "CARET": 3, "PIPE": 2,
+            "AND": 1, "OR": 0,
         }.get(op, 0)
     def parse_primary(self) -> Expr:
         if self.peek().kind in {
-            "RPAREN",
-            "RBRACE",
-            "RBRACKET",
-            "COMMA",
-            "SEMI",
-            "COLON",
+            "RPAREN", "RBRACE",
+            "RBRACKET", "COMMA",
+            "SEMI", "COLON",
         }:
             t = self.peek()
             bhumi_report_error(
@@ -2187,25 +2158,11 @@ def unify_types(t1: str, t2: str) -> Optional[str]:
         return "float32"
     return None
 type_map = {
-    "int": "i64",
-    "int8": "i8",
-    "int16": "i16",
-    "int32": "i32",
-    "void": "void",
-    "int64": "i64",
-    "float": "double",
-    "bool": "i1",
-    "char": "i8",
-    "string": "i8*",
-    "void*": "i8*",
-    "uint": "i64",
-    "uint8": "i8",
-    "uint16": "i16",
-    "uint32": "i32",
-    "uint64": "i64",
-    "int1": "i1",
-    "uint1": "i1",
-    "float32": "float",
+    "int": "i64", "int8": "i8", "int16": "i16", "int32": "i32",
+    "void": "void", "int64": "i64", "float": "double", "bool": "i1",
+    "char": "i8", "string": "i8*", "void*": "i8*", "uint": "i64",
+    "uint8": "i8", "uint16": "i16", "uint32": "i32", "uint64": "i64",
+    "int1": "i1", "uint1": "i1", "float32": "float",
 }
 struct_llvm_defs: List[str] = []
 symbol_table = SymbolTable()
