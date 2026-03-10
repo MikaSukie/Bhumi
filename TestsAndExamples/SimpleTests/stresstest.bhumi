@@ -332,20 +332,20 @@ enum Color { Red; Green; Blue; }
 pub fn test_enum1() <int> {
   Color c = Color.Green;
   match (c) {
-    Red:  { return 0; }
-    Green:{ return 1; }
-    Blue: { return 2; }
+    Red   { return 0; }
+    Green { return 1; }
+    Blue  { return 2; }
   }
   return 0;
 }
 
 // enum2
-enum Opt { None; Some: int; }
+enum Opt { None; Some(int); }
 pub fn test_enum2() <int> {
   Opt o = Opt->Some(42);
   match (o) {
-    None:     { return 0; }
-    Some(x):  { return x; }
+    None      { return 0; }
+    Some(x)   { return x; }
   }
   return 0;
 }
@@ -353,7 +353,7 @@ pub fn test_enum2() <int> {
 // generic enum
 enum Option<T> {
   None;
-  Some: T;
+  Some(T);
 }
 pub fn test_generic_enum() <int> {
     return 0;
@@ -379,9 +379,6 @@ pub fn test_multigeneric() <int> {
   pair(1, 2.0);
   return 0;
 }
-
-// enums with space definitions.
-enum Opt { None; Some int; }
 
 // ----------------- END NEW STRESS TESTS -----------------
 
