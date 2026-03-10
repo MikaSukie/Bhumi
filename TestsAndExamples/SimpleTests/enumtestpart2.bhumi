@@ -34,34 +34,3 @@ pub fn test_safe_div_direct() <int> {
     }
     return 0;
 }
-
-enum Exist<T> {
-  None;
-  Some: T;
-}
-
-enum Respond<T, E> { 
-    Ok: T;
-    Err: E;
-}
-
-pub fn safe_div_direct(int a, int b) <Respond<int, string>> {
-    if (b == 0) {
-        return Err("division by zero");
-    }
-    return Ok(a / b);
-}
-
-pub fn test_safe_div_direct() <int> {
-    Respond<int, string> r = safe_div_direct(10, 2);
-    match (r) {
-        Ok(v): {
-            printnl("quotient: ");
-            print(itostr(v)); newline();
-        }
-        Err(msg): {
-            print("error: "); print(msg); newline();
-        }
-    }
-    return 0;
-}
