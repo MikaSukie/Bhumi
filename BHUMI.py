@@ -110,7 +110,7 @@ KEYWORDS = {
     "nomd",     "pin",       "crumble",
     "nown",
     "typeswitch","typecase", "fallback",
-    "autoregion","except",
+    "autoregion",
 }
 SINGLE_CHARS = {
     "(": "LPAREN",   ")": "RPAREN",
@@ -1128,7 +1128,6 @@ class VAwaitExpr(Expr):
     expr: Expr
 @dataclass
 class AutoRegion(Stmt):
-    except_vars: List[str]
     body: List[Stmt]
 @dataclass
 class Func:
@@ -1167,6 +1166,8 @@ loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
 autoregion_stack: List[Dict[str, object]] = []
+binding_enum_payload: Dict[str, tuple] = {}
+binding_source_name: Dict[str, str] = {}
 _entry_alloca_buf: List[str] = []
 _expr_type_cache: Dict[int, str] = {}
 _parse_cache: Dict[str, Any] = {}
@@ -1733,25 +1734,10 @@ class Parser:
         return Assign(name, binop)
     def parse_autoregion(self) -> AutoRegion:
         self.expect("AUTOREGION")
-        except_list: List[str] = []
-        if self.peek().kind == "EXCEPT":
-            self.bump()
-            self.expect("LPAREN")
-            while True:
-                if self.peek().kind != "IDENT":
-                    bhumi_report_error(
-                        self.peek().line,
-                        self.peek().col,
-                        "Expected identifier in except(...)",
-                    )
-                except_list.append(self.bump().value)
-                if not self.match("COMMA"):
-                    break
-            self.expect("RPAREN")
         self.expect("LBRACE")
         body = self.parse_block()
         self.expect("RBRACE")
-        return AutoRegion(except_vars=except_list, body=body)
+        return AutoRegion(body=body)
     def parse_crumble(self) -> CrumbleStmt:
         self.expect("LPAREN")
         var_name = self.expect("IDENT").value
@@ -2193,7 +2179,23 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             if ssa_tmp == ssa_name:
                 cast_tmp = new_tmp()
                 out.append(f"  {cast_tmp} = bitcast {llvm_typ} {ssa_tmp} to i8*")
-                out.append(f"  call void @free(i8* {cast_tmp})")
+                out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
+                _sym_df = symbol_table.lookup(vn)
+                if _sym_df:
+                    _ir_df = _sym_df[1]
+                    _addr_df = f"@{_ir_df}" if _ir_df.startswith("@") else f"%{_ir_df}_addr"
+                    out.append(f"  store {llvm_typ} null, {llvm_typ}* {_addr_df}")
+                    _bep_df = binding_enum_payload.get(_ir_df)
+                    if _bep_df is not None:
+                        _bep_df_subj, _bep_df_en, _bep_df_vi, _bep_df_pty, _bep_df_slot = _bep_df
+                        out.append(f"  store {_bep_df_pty} null, {_bep_df_pty}* {_bep_df_slot}")
+                    for _ctx in autoregion_stack:
+                        _ctx.get("body_decl_names", set()).discard(vn)
+                        _eiro = _ctx.get("extra_ir_owned", [])
+                        _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
+                            for _ir_nm, _ir_ty, _ir_src in _eiro
+                            if _ir_nm != _ir_df
+                        ]
                 cr["owned"] = False
                 if vn in owned_vars:
                     owned_vars.discard(vn)
@@ -3118,6 +3120,52 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             ty2 = infer_type(arg)
             arg_types.append(ty2)
             arg_vals.append(a)
+        def _is_enum_variant_name(name):
+            bare = name.split("->")[-1] if "->" in name else name
+            for _ev_variants in enum_variant_map.values():
+                for _ev_vname, _ in _ev_variants:
+                    if _ev_vname == bare:
+                        return True
+            return False
+        if _is_enum_variant_name(expr.name):
+            for _ot_arg, _ot_ty in zip(expr.args, arg_types):
+                if (
+                    isinstance(_ot_arg, Var)
+                    and _ot_arg.name in owned_vars
+                    and _ot_ty is not None
+                    and (_ot_ty == "string" or _ot_ty.endswith("*"))
+                ):
+                    owned_vars.discard(_ot_arg.name)
+        if autoregion_stack and not _is_enum_variant_name(expr.name):
+            for _spill_i, (_spill_arg, _spill_val, _spill_ty) in enumerate(
+                zip(expr.args, arg_vals, arg_types)
+            ):
+                if not isinstance(_spill_arg, Call):
+                    continue
+                _spill_nown = getattr(
+                    _func_name_map.get(_spill_arg.name), "is_nown", False
+                )
+                if _spill_nown:
+                    continue
+                if _spill_ty is None or not (
+                    _spill_ty == "string" or _spill_ty.endswith("*")
+                ):
+                    continue
+                _spill_llvm_ty = llvm_ty_of(_spill_ty)
+                _spill_id = new_tmp()[1:]
+                _spill_name = f"__ar_anon_{_spill_id}"
+                _entry_alloca_buf.append(
+                    f"  %{_spill_name}_addr = alloca {_spill_llvm_ty}"
+                )
+                _entry_alloca_buf.append(
+                    f"  store {_spill_llvm_ty} null, {_spill_llvm_ty}* %{_spill_name}_addr"
+                )
+                out.append(
+                    f"  store {_spill_llvm_ty} {_spill_val}, {_spill_llvm_ty}* %{_spill_name}_addr"
+                )
+                symbol_table.declare(_spill_name, _spill_llvm_ty, _spill_name)
+                owned_vars.add(_spill_name)
+                autoregion_stack[-1]["body_decl_names"].add(_spill_name)
         candidates = []
         for ename, variants in enum_variant_map.items():
             if "__mono__" in ename:
@@ -3453,6 +3501,14 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             )
         if ret_ty == "void":
             if call_target == "free" and len(arg_vals) == 1:
+                if autoregion_stack:
+                    bhumi_report_error(
+                        getattr(expr, "lineno", None),
+                        getattr(expr, "col", None),
+                        "free() is not allowed inside an autoregion, "
+                        "autoregion manages memory automatically. "
+                        "Use crumble() to declare explicit lifetime bounds.",
+                    )
                 ptr_val = arg_vals[0]
                 ptr_ty  = arg_types[0] if arg_types else "void*"
                 ptr_llvm = llvm_ty_of(ptr_ty) if ptr_ty else "i8*"
@@ -3461,7 +3517,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 else:
                     ptr_i8 = new_tmp()
                     out.append(f"  {ptr_i8} = bitcast {ptr_llvm} {ptr_val} to i8*")
-                out.append(f"  call void @bhumi_c_free(i8* {ptr_i8})")
+                out.append(f"  call void @bhumi_ffi_free(i8* {ptr_i8})")
                 if expr.args and isinstance(expr.args[0], Var):
                     _fvn = expr.args[0].name
                     _fsym = symbol_table.lookup(_fvn)
@@ -3469,11 +3525,24 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         _fty, _fname = _fsym
                         _faddr = f"@{_fname}" if _fname.startswith("@") else f"%{_fname}_addr"
                         out.append(f"  store {_fty} null, {_fty}* {_faddr}")
+                        _bep = binding_enum_payload.get(_fname)
+                        if _bep is not None:
+                            _bep_enum_ptr, _bep_enum_nm, _bep_vidx, _bep_pty, _bep_slot = _bep
+                            out.append(f"  store {_bep_pty} null, {_bep_pty}* {_bep_slot}")
                         if _fvn in crumb_runtime:
                             crumb_runtime[_fvn]["owned"] = False
                         owned_vars.discard(_fvn)
-                for arg_expr, arg_val in zip(expr.args, arg_vals):
-                    _maybe_flush_deferred(arg_expr, arg_val)
+                        for _ctx in autoregion_stack:
+                            _eirowned = _ctx.get("extra_ir_owned", [])
+                            _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
+                                for _ir_nm, _ir_ty, _ir_src in _eirowned
+                                if _ir_nm != _fname
+                            ]
+                if expr.args and isinstance(expr.args[0], Var):
+                    _cancel_vn = expr.args[0].name
+                    _cancel_cr = crumb_runtime.get(_cancel_vn)
+                    if _cancel_cr:
+                        _cancel_cr.pop("_deferred_frees", None)
                 return ""
             out.append(f"  call void @{call_target}({', '.join(args_ir)})")
             for arg_expr, arg_val in zip(expr.args, arg_vals):
@@ -3986,6 +4055,88 @@ def infer_type(expr: Expr) -> str:
         getattr(expr, "col", None),
         f"Cannot infer type for expression: {expr}",
     )
+def emit_deep_free(llvm_ty: str, ptr_tmp: str, out: List[str], safe_envelope: bool = False) -> None:
+    enum_name = None
+    if llvm_ty.startswith("%enum.") and llvm_ty.endswith("*"):
+        enum_name = llvm_ty[len("%enum."):-1]
+    elif llvm_ty.startswith("%struct.") and llvm_ty.endswith("*"):
+        bare = llvm_ty[len("%struct."):-1]
+        if bare in enum_variant_map:
+            enum_name = bare
+    if enum_name is not None and enum_name in enum_variant_map:
+        variants = enum_variant_map[enum_name]
+        ptr_variants = [
+            (vname, vp) for vname, vp in variants
+            if vp is not None and llvm_ty_of(vp).endswith("*")
+        ]
+        if ptr_variants:
+            tag_tmp = new_tmp()
+            tag_ptr_tmp = new_tmp()
+            out.append(
+                f"  {tag_ptr_tmp} = getelementptr inbounds %enum.{enum_name}, "
+                f"%enum.{enum_name}* {ptr_tmp}, i32 0, i32 0"
+            )
+            out.append(f"  {tag_tmp} = load i32, i32* {tag_ptr_tmp}")
+            after_payload_lbl = new_label("dp_after_payload")
+            for idx, (vname, vp) in enumerate(variants):
+                if vp is None:
+                    continue
+                vp_llvm = llvm_ty_of(vp)
+                if not vp_llvm.endswith("*"):
+                    continue
+                is_variant_tmp = new_tmp()
+                out.append(f"  {is_variant_tmp} = icmp eq i32 {tag_tmp}, {idx}")
+                do_payload_lbl = new_label(f"dp_pay_{vname}")
+                skip_payload_lbl = new_label(f"dp_nopay_{vname}")
+                out.append(
+                    f"  br i1 {is_variant_tmp}, label %{do_payload_lbl}, "
+                    f"label %{skip_payload_lbl}"
+                )
+                out.append(f"{do_payload_lbl}:")
+                raw_slot_tmp = new_tmp()
+                cast_slot_tmp = new_tmp()
+                loaded_pay_tmp = new_tmp()
+                out.append(
+                    f"  {raw_slot_tmp} = getelementptr inbounds %enum.{enum_name}, "
+                    f"%enum.{enum_name}* {ptr_tmp}, i32 0, i32 1"
+                )
+                out.append(
+                    f"  {cast_slot_tmp} = bitcast [8 x i8]* {raw_slot_tmp} to {vp_llvm}*"
+                )
+                out.append(
+                    f"  {loaded_pay_tmp} = load {vp_llvm}, {vp_llvm}* {cast_slot_tmp}"
+                )
+                null_pay_tmp = new_tmp()
+                pay_cast_tmp = new_tmp()
+                out.append(f"  {pay_cast_tmp} = bitcast {vp_llvm} {loaded_pay_tmp} to i8*")
+                out.append(f"  {null_pay_tmp} = icmp eq i8* {pay_cast_tmp}, null")
+                skip_null_lbl = new_label(f"dp_null_{vname}")
+                do_free_lbl = new_label(f"dp_free_{vname}")
+                out.append(
+                    f"  br i1 {null_pay_tmp}, label %{skip_null_lbl}, "
+                    f"label %{do_free_lbl}"
+                )
+                out.append(f"{do_free_lbl}:")
+                if (
+                    vp_llvm.startswith("%enum.") or
+                    (vp_llvm.startswith("%struct.") and
+                     vp_llvm[len("%struct."):-1] in enum_variant_map)
+                ):
+                    emit_deep_free(vp_llvm, loaded_pay_tmp, out)
+                else:
+                    out.append(f"  call void @bhumi_safe_c_free(i8* {pay_cast_tmp})")
+                out.append(f"  br label %{skip_null_lbl}")
+                out.append(f"{skip_null_lbl}:")
+                out.append(f"  br label %{skip_payload_lbl}")
+                out.append(f"{skip_payload_lbl}:")
+            out.append(f"  br label %{after_payload_lbl}")
+            out.append(f"{after_payload_lbl}:")
+    env_cast = new_tmp()
+    out.append(f"  {env_cast} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+    if safe_envelope and enum_name is None:
+        out.append(f"  call void @bhumi_safe_c_free(i8* {env_cast})")
+    else:
+        out.append(f"  call void @bhumi_free(i8* {env_cast})")
 def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
     if isinstance(stmt, VarDecl):
         def _pick_ir_name(name):
@@ -4151,9 +4302,26 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(f"  {old_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
                     cast_tmp = new_tmp()
                     out.append(f"  {cast_tmp} = bitcast {llvm_ty} {old_tmp} to i8*")
-                    out.append(f"  call void @free(i8* {cast_tmp})")
+                    out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
+                    out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+                    _sym_crw_pre = symbol_table.lookup(vn)
+                    if _sym_crw_pre:
+                        _ir_crw_pre = _sym_crw_pre[1]
+                        _bep_crw = binding_enum_payload.get(_ir_crw_pre)
+                        if _bep_crw is not None:
+                            _bcrw_subj, _bcrw_en, _bcrw_vi, _bcrw_pty, _bcrw_slot = _bep_crw
+                            out.append(f"  store {_bcrw_pty} null, {_bcrw_pty}* {_bcrw_slot}")
                     cr["owned"] = False
                     owned_vars.discard(vn)
+                    for _ctx in autoregion_stack:
+                        _ctx.get("body_decl_names", set()).discard(vn)
+                        _sym_crw = symbol_table.lookup(vn)
+                        if _sym_crw:
+                            _ir_crw = _sym_crw[1]
+                            _eiro_crw = _ctx.get("extra_ir_owned", [])
+                            _ctx["extra_ir_owned"] = [
+                                (_n, _t, _s) for _n, _t, _s in _eiro_crw if _n != _ir_crw
+                            ]
                     if _rmax is None:
                         print(
                             f"[Bhumi] Warning: crumble '{vn}' autofreed after {_wmax} write(s); "
@@ -4169,10 +4337,26 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 ):
                     cast_tmp2 = new_tmp()
                     out.append(f"  {cast_tmp2} = bitcast {llvm_ty} {val} to i8*")
-                    out.append(f"  call void @free(i8* {cast_tmp2})")
+                    out.append(f"  call void @bhumi_free(i8* {cast_tmp2})")
                     out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+                    _sym_crw2_pre = symbol_table.lookup(vn)
+                    if _sym_crw2_pre:
+                        _ir_crw2_pre = _sym_crw2_pre[1]
+                        _bep_crw2 = binding_enum_payload.get(_ir_crw2_pre)
+                        if _bep_crw2 is not None:
+                            _bcrw2_subj, _bcrw2_en, _bcrw2_vi, _bcrw2_pty, _bcrw2_slot = _bep_crw2
+                            out.append(f"  store {_bcrw2_pty} null, {_bcrw2_pty}* {_bcrw2_slot}")
                     cr["owned"] = False
                     owned_vars.discard(vn)
+                    for _ctx in autoregion_stack:
+                        _ctx.get("body_decl_names", set()).discard(vn)
+                        _sym_crw2 = symbol_table.lookup(vn)
+                        if _sym_crw2:
+                            _ir_crw2 = _sym_crw2[1]
+                            _eiro_crw2 = _ctx.get("extra_ir_owned", [])
+                            _ctx["extra_ir_owned"] = [
+                                (_n, _t, _s) for _n, _t, _s in _eiro_crw2 if _n != _ir_crw2
+                            ]
                     handled_write_exhaustion_new_alloc = True
                     if _rmax is None:
                         print(
@@ -4311,7 +4495,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             "scope_index": scope_index,
             "body_decl_names": body_decl_names,
             "pre_owned_snapshot": pre_owned_snapshot,
-            "except": set(stmt.except_vars),
         }
         autoregion_stack.append(ctx)
         for s in stmt.body:
@@ -4320,11 +4503,9 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         for _vn in list(owned_vars):
             if _vn not in pre_owned_snapshot:
                 candidates.add(_vn)
-        exset = ctx["except"]
+        _xir_names = {_n for _n, _t, _s in ctx.get("extra_ir_owned", [])}
         import sys as _sys
         for nm in candidates:
-            if nm in exset:
-                continue
             cr = crumb_runtime.get(nm)
             owned_here = (nm in owned_vars) or (cr is not None and cr.get("owned"))
             if not owned_here:
@@ -4334,6 +4515,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 continue
             llvm_ty, llvm_name = result
             if not llvm_ty.endswith("*"):
+                continue
+            if llvm_name in _xir_names:
                 continue
             if cr is not None:
                 _rmax_v = cr.get("rmax")
@@ -4373,13 +4556,29 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             out.append(f"  {ar_null_tmp} = icmp eq i8* {cast_tmp}, null")
             out.append(f"  br i1 {ar_null_tmp}, label %{ar_skip_lbl}, label %{ar_free_lbl}")
             out.append(f"{ar_free_lbl}:")
-            out.append(f"  call void @bhumi_c_free(i8* {cast_tmp})")
+            emit_deep_free(llvm_ty, ptr_tmp, out)
             out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
             out.append(f"  br label %{ar_skip_lbl}")
             out.append(f"{ar_skip_lbl}:")
             if nm in crumb_runtime:
                 crumb_runtime[nm]["owned"] = False
             owned_vars.discard(nm)
+        for _ir_nm, _ir_ty, _ir_src in ctx.get("extra_ir_owned", []):
+            _ir_addr = f"%{_ir_nm}_addr"
+            _ir_ptr = new_tmp()
+            _ir_cast = new_tmp()
+            _ir_null = new_tmp()
+            _ir_skip = new_label("xir_skip")
+            _ir_free = new_label("xir_free")
+            out.append(f"  {_ir_ptr} = load {_ir_ty}, {_ir_ty}* {_ir_addr}")
+            out.append(f"  {_ir_cast} = bitcast {_ir_ty} {_ir_ptr} to i8*")
+            out.append(f"  {_ir_null} = icmp eq i8* {_ir_cast}, null")
+            out.append(f"  br i1 {_ir_null}, label %{_ir_skip}, label %{_ir_free}")
+            out.append(f"{_ir_free}:")
+            out.append(f"  call void @bhumi_free(i8* {_ir_cast})")
+            out.append(f"  store {_ir_ty} null, {_ir_ty}* {_ir_addr}")
+            out.append(f"  br label %{_ir_skip}")
+            out.append(f"{_ir_skip}:")
         autoregion_stack.pop()
         symbol_table.pop()
         return
@@ -4451,7 +4650,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         if autoregion_stack:
             import sys as _sys
             for ctx in reversed(autoregion_stack):
-                exset = ctx.get("except", set())
                 body_decl_names = ctx.get("body_decl_names", set())
                 pre_owned = ctx.get("pre_owned_snapshot", set())
                 candidates = set(body_decl_names)
@@ -4459,8 +4657,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     if _vn2 not in pre_owned:
                         candidates.add(_vn2)
                 for nm in candidates:
-                    if nm in exset:
-                        continue
                     cr = crumb_runtime.get(nm)
                     owned_here = (nm in owned_vars) or (
                         cr is not None and cr.get("owned")
@@ -4513,7 +4709,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(f"  {ret_ar_null} = icmp eq i8* {cast_tmp}, null")
                     out.append(f"  br i1 {ret_ar_null}, label %{ret_ar_skip}, label %{ret_ar_free}")
                     out.append(f"{ret_ar_free}:")
-                    out.append(f"  call void @bhumi_c_free(i8* {cast_tmp})")
+                    emit_deep_free(llvm_ty, ptr_tmp, out)
                     out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
                     out.append(f"  br label %{ret_ar_skip}")
                     out.append(f"{ret_ar_skip}:")
@@ -4546,6 +4742,14 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
     elif isinstance(stmt, ExprStmt):
         gen_expr(stmt.expr, out)
     elif isinstance(stmt, ForgetStmt):
+        if autoregion_stack:
+            bhumi_report_error(
+                getattr(stmt, "lineno", None),
+                getattr(stmt, "col", None),
+                f"forget('{stmt.varname}') is not allowed inside an autoregion, "
+                "autoregion manages memory automatically. "
+                "Use crumble() to declare explicit lifetime bounds.",
+            )
         llvm_ty, llvm_name = symbol_table.lookup(stmt.varname)
         if not llvm_ty.endswith("*"):
             bhumi_report_error(
@@ -4558,33 +4762,32 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
         cast_tmp = new_tmp()
         out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-        skip_lbl       = new_label("free_skip")
-        try_free_lbl   = new_label("try_free")
+        skip_lbl     = new_label("forget_skip")
+        try_free_lbl = new_label("forget_try")
         null_tmp = new_tmp()
         out.append(f"  {null_tmp} = icmp eq i8* {cast_tmp}, null")
         out.append(f"  br i1 {null_tmp}, label %{skip_lbl}, label %{try_free_lbl}")
         out.append(f"{try_free_lbl}:")
-        asize_tmp = new_tmp()
-        out.append(f"  {asize_tmp} = call i64 @bhumi_alloc_size(i8* {cast_tmp})")
-        is_bhumi_tmp = new_tmp()
-        out.append(f"  {is_bhumi_tmp} = icmp ne i64 {asize_tmp}, 0")
-        bhumi_free_lbl = new_label("do_bhumi_free")
-        c_free_lbl     = new_label("do_c_free")
-        out.append(f"  br i1 {is_bhumi_tmp}, label %{bhumi_free_lbl}, label %{c_free_lbl}")
-        out.append(f"{bhumi_free_lbl}:")
-        out.append(f"  call void @bhumi_free(i8* {cast_tmp})")
-        null_store_lbl = new_label("do_null_store")
-        out.append(f"  br label %{null_store_lbl}")
-        out.append(f"{c_free_lbl}:")
-        out.append(f"  call void @bhumi_c_free(i8* {cast_tmp})")
+        emit_deep_free(llvm_ty, ptr_tmp, out, safe_envelope=True)
+        null_store_lbl = new_label("forget_null_store")
         out.append(f"  br label %{null_store_lbl}")
         out.append(f"{null_store_lbl}:")
         out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+        _fgt_bep = binding_enum_payload.get(llvm_name)
+        if _fgt_bep is not None:
+            _fgt_ep, _fgt_en, _fgt_vi, _fgt_pty, _fgt_slot = _fgt_bep
+            out.append(f"  store {_fgt_pty} null, {_fgt_pty}* {_fgt_slot}")
         out.append(f"  br label %{skip_lbl}")
         out.append(f"{skip_lbl}:")
         if stmt.varname in crumb_runtime:
             crumb_runtime[stmt.varname]["owned"] = False
         owned_vars.discard(stmt.varname)
+        for _ctx in autoregion_stack:
+            _eirowned = _ctx.get("extra_ir_owned", [])
+            _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
+                for _ir_nm, _ir_ty, _ir_src in _eirowned
+                if _ir_nm != llvm_name
+            ]
     elif isinstance(stmt, Match):
         raw_ty = infer_type(stmt.expr)
         if isinstance(stmt.expr, Var):
@@ -4717,8 +4920,19 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         f"  store {llvm_payload_ty} {outer_payload_val}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
                     symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
-                    if llvm_payload_ty.endswith("*") and outer_enum_ptr_owned:
+                    _nested_payload_is_bhumi_obj = (
+                        llvm_payload_ty.endswith("*")
+                        and (
+                            llvm_payload_ty.startswith("%enum.")
+                            or llvm_payload_ty.startswith("%struct.")
+                        )
+                    )
+                    if _nested_payload_is_bhumi_obj and outer_enum_ptr_owned:
                         owned_vars.add(case.binding)
+                        if autoregion_stack:
+                            autoregion_stack[-1].setdefault(
+                                "extra_ir_owned", []
+                            ).append((binding_ir, llvm_payload_ty, case.binding))
                 for s in case.body:
                     gen_stmt(s, out, ret_ty)
                 last = out[-1].strip() if out else ""
@@ -4879,11 +5093,32 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
                     symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
+                    if llvm_payload_ty.endswith("*"):
+                        _v_idx = next(
+                            (i for i, (vn, _) in enumerate(enum_variant_map.get(enum_name, []))
+                             if vn == case.variant), None
+                        )
+                        _subj_var_name = stmt.expr.name if isinstance(stmt.expr, Var) else None
+                        binding_enum_payload[binding_ir] = (
+                            _subj_var_name, enum_name, _v_idx, llvm_payload_ty, payload_ptr_cast
+                        )
+                        binding_source_name[binding_ir] = case.binding
                     _match_subj_owned = False
                     if isinstance(stmt.expr, Var):
                         _match_subj_owned = stmt.expr.name in owned_vars
-                    if llvm_payload_ty.endswith("*") and _match_subj_owned:
+                    _payload_is_bhumi_obj = (
+                        llvm_payload_ty.endswith("*")
+                        and (
+                            llvm_payload_ty.startswith("%enum.")
+                            or llvm_payload_ty.startswith("%struct.")
+                        )
+                    )
+                    if _payload_is_bhumi_obj and _match_subj_owned:
                         owned_vars.add(case.binding)
+                        if autoregion_stack:
+                            autoregion_stack[-1].setdefault(
+                                "extra_ir_owned", []
+                            ).append((binding_ir, llvm_payload_ty, case.binding))
             if case.nested_pattern is not None:
                 _subj_owned_nested = isinstance(stmt.expr, Var) and stmt.expr.name in owned_vars
                 gen_nested_match_case(
@@ -4927,6 +5162,8 @@ def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
 def gen_func(fn: Func) -> List[str]:
     crumb_runtime.clear()
     owned_vars.clear()
+    binding_enum_payload.clear()
+    binding_source_name.clear()
     _entry_alloca_buf.clear()
     if fn.type_params:
         return []
@@ -5450,6 +5687,8 @@ def compile_program(prog: Program) -> str:
     func_table["malloc"] = "i8*"
     func_table["free"] = "void"
     func_table["bhumi_c_free"] = "void"
+    func_table["bhumi_safe_c_free"] = "void"
+    func_table["bhumi_ffi_free"] = "void"
     func_table["bhumi_tbl_insert"] = "void"
     func_table["bhumi_tbl_remove"] = "void"
     func_table["bhumi_tbl_contains"] = "i1"
@@ -5480,13 +5719,26 @@ def compile_program(prog: Program) -> str:
         "declare void @srand(i32)",
         "declare i32 @rand()",
         "declare i32 @usleep(i32)",
+        "declare i64 @malloc_usable_size(i8*)",
+        "declare i8* @signal(i32, i8*)",
         "",
     ]
     runtime_block = """
 @.oob_msg = private unnamed_addr constant [52 x i8] c"[BhumiCompiler-RT-CHCK]: Index out of bounds error.\\00"
 @.null_msg = private unnamed_addr constant [45 x i8] c"[BhumiCompiler-RT-CHCK]: Null pointer deref.\\00"
 @.heap_msg = private unnamed_addr constant [67 x i8] c"[BhumiCompiler-RT-HEAP]: Invalid free or heap corruption detected.\\00"
+@.segv_msg = private unnamed_addr constant [71 x i8] c"[BhumiCompiler-RT-CHCK]: Segmentation fault / memory violation caught.\\00"
+@.ffi_free_msg = private unnamed_addr constant [78 x i8] c"[BhumiCompiler-RT-HEAP]: free() on bhumi-owned pointer; use forget() instead.\\00"
+@.forget_c_msg = private unnamed_addr constant [83 x i8] c"[BhumiCompiler-RT-HEAP]: forget() on non-bhumi pointer; use free() for FFI allocs.\\00"
 @.alloc_magic = global i64 0
+; Signal handler: catches SIGSEGV (11) and SIGABRT (6), prints a message and exits
+; cleanly so the runtime message is always visible.
+define void @bhumi_signal_handler(i32 %sig) {
+entry:
+  %tmp = call i32 @puts(i8* getelementptr inbounds ([71 x i8], [71 x i8]* @.segv_msg, i32 0, i32 0))
+  call void @exit(i32 1)
+  unreachable
+}
 define void @bhumi_oob_abort() {
 entry:
   %tmp_puts = call i32 @puts(i8* getelementptr inbounds ([52 x i8], [52 x i8]* @.oob_msg, i32 0, i32 0))
@@ -5508,6 +5760,11 @@ entry:
   %r64 = zext i32 %r to i64
   %xor_magic = xor i64 %r64, 16045690984833335023
   store i64 %xor_magic, i64* @.alloc_magic
+  ; Install SIGSEGV (11) and SIGABRT (6) handlers so any memory violation
+  ; produces a clean Bhumi runtime message instead of a raw OS crash.
+  %handler = bitcast void (i32)* @bhumi_signal_handler to i8*
+  %_prev_segv = call i8* @signal(i32 11, i8* %handler)
+  %_prev_abrt = call i8* @signal(i32 6, i8* %handler)
   ret void
 }
 ; Side table: open-addressing hash set of bhumi-owned user pointers.
@@ -5788,6 +6045,42 @@ is_c_alloc:
 done:
   ret void
 }
+; bhumi_safe_c_free: like bhumi_c_free but skips non-heap pointers (e.g. string
+; literals in .rodata).  Uses malloc_usable_size to distinguish heap from static.
+define void @bhumi_safe_c_free(i8* %userptr) nounwind {
+entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %check_heap
+check_heap:
+  %usable = call i64 @malloc_usable_size(i8* %userptr)
+  %is_heap = icmp ugt i64 %usable, 0
+  br i1 %is_heap, label %do_free, label %done
+do_free:
+  call void @bhumi_c_free(i8* %userptr)
+  br label %done
+done:
+  ret void
+}
+; bhumi_ffi_free: strict C-only free for FFI-allocated memory.
+; Aborts with an error if the pointer is bhumi-owned, those must be freed
+; with forget() so bhumi can update its side-table and prevent UAF/DF.
+define void @bhumi_ffi_free(i8* %userptr) nounwind {
+entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %ffi_done, label %ffi_check_tbl
+ffi_check_tbl:
+  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
+  br i1 %is_bhumi, label %ffi_bhumi_err, label %ffi_do_free
+ffi_bhumi_err:
+  %tmp_ffi = call i32 @puts(i8* getelementptr inbounds ([78 x i8], [78 x i8]* @.ffi_free_msg, i32 0, i32 0))
+  call void @exit(i32 1)
+  unreachable
+ffi_do_free:
+  call void @free(i8* %userptr)
+  br label %ffi_done
+ffi_done:
+  ret void
+}
 define void @bhumi_vvolatile_abort() {
 entry:
   %tmp_puts_vv = call i32 @puts(i8* getelementptr inbounds ([69 x i8], [69 x i8]* @.vvolatile_msg, i32 0, i32 0))
@@ -5918,6 +6211,10 @@ done:
 """
     runtime_block_noop = """
 @.alloc_magic = global i64 0
+define void @bhumi_signal_handler(i32 %sig) {
+entry:
+  ret void
+}
 define void @bhumi_oob_abort() {
 entry:
   ret void
@@ -5950,6 +6247,30 @@ entry:
   br i1 %is_null, label %done, label %do_free
 do_free:
   call void @free(i8* %userptr)
+  br label %done
+done:
+  ret void
+}
+define void @bhumi_ffi_free(i8* %userptr) nounwind {
+entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %do_free
+do_free:
+  call void @free(i8* %userptr)
+  br label %done
+done:
+  ret void
+}
+define void @bhumi_safe_c_free(i8* %userptr) nounwind {
+entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %check_heap
+check_heap:
+  %usable = call i64 @malloc_usable_size(i8* %userptr)
+  %is_heap = icmp ugt i64 %usable, 0
+  br i1 %is_heap, label %do_free_safe, label %done
+do_free_safe:
+  call void @bhumi_c_free(i8* %userptr)
   br label %done
 done:
   ret void
@@ -6657,7 +6978,7 @@ def check_types(prog: Program):
                 return "int"
             candidates = variant_map.get(variant_name, []).copy()
             gm = globals().get("variant_map_global", {})
-            candidates.extend(gm.get(expr.name, []))
+            candidates.extend(gm.get(variant_name, []))
             if candidates:
                 chosen = None
                 if qualified_enum is not None:
@@ -6665,7 +6986,31 @@ def check_types(prog: Program):
                         (ename, payload)
                         for (ename, payload) in candidates
                         if ename == qualified_enum
+                        or ename.startswith(qualified_enum + "__mono__")
                     ]
+                    if not candidates:
+                        _all_variants = variant_map.get(variant_name, [])
+                        _all_variants_g = list(gm.get(variant_name, []))
+                        _all_enums = {
+                            (e.split("__mono__")[0] if "__mono__" in e else e)
+                            for e, _ in (_all_variants + _all_variants_g)
+                        }
+                        def _pretty_enum_name_err(raw: str) -> str:
+                            base = raw.partition("__mono__")[0] if "__mono__" in raw else raw
+                            orig = globals().get("original_enum_defs", {}).get(base)
+                            if orig is None:
+                                return base
+                            tps = getattr(orig, "type_params", [])
+                            return base + "<" + ", ".join(tps) + ">" if tps else base
+                        _others = ", ".join(
+                            sorted({_pretty_enum_name_err(e) for e in _all_enums if e != qualified_enum})
+                        )
+                        _exists_msg = f" '{variant_name}' exists in: {_others}" if _others else ""
+                        bhumi_report_error(
+                            getattr(expr, "lineno", None),
+                            getattr(expr, "col", None),
+                            f"Enum '{qualified_enum}' has no variant '{variant_name}'.{_exists_msg}",
+                        )
                 mono_bases = {
                     ename.split("__mono__")[0]
                     for (ename, _) in candidates
@@ -6677,6 +7022,20 @@ def check_types(prog: Program):
                         for (ename, payload) in candidates
                         if "__mono__" in ename or ename not in mono_bases
                     ]
+                _orig_defs = globals().get("original_enum_defs", {})
+                concrete_candidates = [
+                    (ename, payload) for (ename, payload) in candidates
+                    if not (
+                        payload is not None
+                        and payload in getattr(
+                            _orig_defs.get(ename.partition("__mono__")[0] if "__mono__" in ename else ename),
+                            "type_params", []
+                        )
+                        and "__mono__" not in ename
+                    )
+                ]
+                if concrete_candidates:
+                    candidates = concrete_candidates
                 if len(candidates) > 1 and expected is not None:
                     exp_bare = expected.rstrip("*")
                     preferred = [
@@ -6686,17 +7045,43 @@ def check_types(prog: Program):
                     ]
                     if len(preferred) == 1:
                         candidates = preferred
+                if len(candidates) > 1 and arg_types:
+                    payload_matched = [
+                        (ename, payload)
+                        for (ename, payload) in candidates
+                        if payload is not None
+                        and (
+                            unify_types(payload, arg_types[0]) is not None
+                            or unify_types(arg_types[0], payload) is not None
+                        )
+                    ]
+                    if len(payload_matched) == 1:
+                        candidates = payload_matched
                 if len(candidates) > 1:
+                    def _pretty_enum_name(raw: str) -> str:
+                        base = raw.partition("__mono__")[0] if "__mono__" in raw else raw
+                        orig = globals().get("original_enum_defs", {}).get(base)
+                        if orig is None:
+                            return base
+                        type_params = getattr(orig, "type_params", [])
+                        return base + "<" + ", ".join(type_params) + ">" if type_params else base
                     msg_lines = []
                     msg_lines.append(f"ambiguous enum variant '{variant_name}'")
                     msg_lines.append("")
                     msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
+                    seen_bases: set = set()
                     for ename, payload in candidates:
+                        pretty = _pretty_enum_name(ename)
+                        base_key = ename.partition("__mono__")[0] if "__mono__" in ename else ename
+                        if base_key in seen_bases:
+                            continue
+                        seen_bases.add(base_key)
                         payload_desc = "no payload" if payload is None else f"payload={payload}"
-                        msg_lines.append(f"  - {ename}->{variant_name}  ({payload_desc})")
+                        msg_lines.append(f"  - {pretty}->{variant_name}  ({payload_desc})")
                     msg_lines.append("")
                     msg_lines.append("To fix, qualify the variant with its enum name:")
-                    msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}->{variant_name}(...)")
+                    best = _pretty_enum_name(candidates[0][0])
+                    msg_lines.append(f"  - To choose a variant:  {best}->{variant_name}(...)")
                     bhumi_report_error(
                         getattr(expr, "lineno", None),
                         getattr(expr, "col", None),
@@ -6704,8 +7089,56 @@ def check_types(prog: Program):
                     )
                 chosen = candidates[0]
                 enum_name, payload = chosen
-                _orig_edef = globals().get("original_enum_defs", {}).get(enum_name)
+                _mono_base = enum_name.split("__mono__")[0] if "__mono__" in enum_name else enum_name
+                _orig_edef = globals().get("original_enum_defs", {}).get(_mono_base)
                 _type_params = getattr(_orig_edef, "type_params", []) if _orig_edef else []
+                if (
+                    "__mono__" in enum_name
+                    and payload is not None
+                    and arg_types
+                    and unify_types(payload, arg_types[0]) is None
+                    and unify_types(arg_types[0], payload) is None
+                    and _orig_edef is not None
+                ):
+                    _base_variant_payload = next(
+                        (v.typ for v in _orig_edef.variants if v.name == variant_name), None
+                    )
+                    if _base_variant_payload in _type_params:
+                        _actuals_retry = None
+                        if expected is not None:
+                            _exp_bare = expected.rstrip("*")
+                            _gm_retry = re.fullmatch(re.escape(_mono_base) + r"<(.+)>", _exp_bare)
+                            if _gm_retry:
+                                _parts = [p.strip() for p in _gm_retry.group(1).split(",")]
+                                if len(_parts) == len(_type_params):
+                                    _actuals_retry = _parts
+                            if _actuals_retry is None:
+                                _mono_prefix = _mono_base + "__mono__"
+                                if _exp_bare.startswith(_mono_prefix) and _exp_bare in enum_variant_map:
+                                    _cvlist = enum_variant_map[_exp_bare]
+                                    _res = [None] * len(_type_params)
+                                    for _ov, (_, _cp) in zip(_orig_edef.variants, _cvlist):
+                                        if _ov.typ is not None and _cp is not None:
+                                            for _i, _tp in enumerate(_type_params):
+                                                if _ov.typ == _tp:
+                                                    _res[_i] = _cp
+                                    if all(r is not None for r in _res):
+                                        _actuals_retry = _res
+                        if _actuals_retry is None:
+                            _param_idx = _type_params.index(_base_variant_payload)
+                            _actuals_retry = list(_type_params)
+                            _actuals_retry[_param_idx] = arg_types[0]
+                        if _actuals_retry is not None and all(
+                            t not in _type_params for t in _actuals_retry
+                        ):
+                            _retry_mono = ensure_monomorph_for_enum(_mono_base, _actuals_retry)
+                            _retry_variants = enum_variant_map.get(_retry_mono, [])
+                            _retry_payload = next(
+                                (p for n, p in _retry_variants if n == variant_name), None
+                            )
+                            enum_name = _retry_mono
+                            payload = _retry_payload
+                            _type_params = []
                 if payload is None:
                     if len(arg_types) != 0:
                         bhumi_report_error(
