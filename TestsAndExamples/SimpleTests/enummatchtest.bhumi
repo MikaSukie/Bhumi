@@ -17,9 +17,9 @@ pub fn safe_div_direct(int a, int b) <Respond<int, string>> {
     
     printnl(typeof(x));
     if (b == 0) {
-        return Err("division by zero");
+        return Respond->Err("division by zero");
     }
-    return Ok(a / b);
+    return Respond->Ok(a / b);
 }
 
 pub fn test_safe_div_direct() <int> {
