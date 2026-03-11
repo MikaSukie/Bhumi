@@ -4746,7 +4746,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             bhumi_report_error(
                 getattr(stmt, "lineno", None),
                 getattr(stmt, "col", None),
-                f"forget('{stmt.varname}') is not allowed inside an autoregion, "
+                f"forget({stmt.varname}) is not allowed inside an autoregion, "
                 "autoregion manages memory automatically. "
                 "Use crumble() to declare explicit lifetime bounds.",
             )
@@ -6046,17 +6046,25 @@ done:
   ret void
 }
 ; bhumi_safe_c_free: like bhumi_c_free but skips non-heap pointers (e.g. string
-; literals in .rodata).  Uses malloc_usable_size to distinguish heap from static.
+; literals in .rodata).  Checks the bhumi side-table first (bhumi pointers are
+; offset +16 from the raw malloc base, so malloc_usable_size returns 0 for them
+; and must NOT be used as the heap guard for bhumi-owned memory).
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %done, label %check_heap
+  br i1 %is_null, label %done, label %check_bhumi
+check_bhumi:
+  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
+  br i1 %is_bhumi, label %do_bhumi_free, label %check_heap
+do_bhumi_free:
+  call void @bhumi_free(i8* %userptr)
+  br label %done
 check_heap:
   %usable = call i64 @malloc_usable_size(i8* %userptr)
   %is_heap = icmp ugt i64 %usable, 0
-  br i1 %is_heap, label %do_free, label %done
-do_free:
-  call void @bhumi_c_free(i8* %userptr)
+  br i1 %is_heap, label %do_c_free, label %done
+do_c_free:
+  call void @free(i8* %userptr)
   br label %done
 done:
   ret void
@@ -6264,13 +6272,19 @@ done:
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %done, label %check_heap
+  br i1 %is_null, label %done, label %check_bhumi
+check_bhumi:
+  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
+  br i1 %is_bhumi, label %do_bhumi_free, label %check_heap
+do_bhumi_free:
+  call void @bhumi_free(i8* %userptr)
+  br label %done
 check_heap:
   %usable = call i64 @malloc_usable_size(i8* %userptr)
   %is_heap = icmp ugt i64 %usable, 0
-  br i1 %is_heap, label %do_free_safe, label %done
-do_free_safe:
-  call void @bhumi_c_free(i8* %userptr)
+  br i1 %is_heap, label %do_c_free, label %done
+do_c_free:
+  call void @free(i8* %userptr)
   br label %done
 done:
   ret void
