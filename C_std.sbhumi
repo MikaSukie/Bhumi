@@ -159,7 +159,7 @@ pub extern fn Uget_string(int h)   <string>;
 
 pub extern fn Ufree_union(int h)     <void>;
 
-fn empty() <string> { return""; }
+fn empty() <string> { return sb_create(); }
 
 enum Exist<T> {
   None;
