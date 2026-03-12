@@ -1,25 +1,22 @@
 import C_std;
 
 fn main() <void> {
-    autoregion {
-        Exist<string> thepath = Exist->Some(input("file path?: "));
-        match (thepath) {
-            Some(contents) {
-                printnl("path is: " + contents);
-            }
-            None {
-                printnl("Null err");
-            }
+    Exist<string> thepath = Exist->Some(input("file path?: "));
+    match (thepath) {
+        Some(contents) {
+            printnl("path is: " + contents);
         }
-        Respond<string, string> infile = try_read_file(thepath);
-        match (infile) {
-            Ok(contents) {
-                printnl(contents);
-                free(contents);
-            }
-            Err(e) {
-                printnl(e);
-            }
+        None {
+            printnl("Null err");
+        }
+    }
+    Respond<string, string> infile = try_read_file(thepath);
+    match (infile) {
+        Ok(contents) {
+            printnl(contents);
+        }
+        Err(e) {
+            printnl(e);
         }
     }
 }
