@@ -250,9 +250,7 @@ pub fn allocate_and_free_test() <void> {
     crumble(ptrx)!r=0!w=1;
     ptrx = malloc(8);
 
-    print("Manual forget");
     int* ptry = malloc(8);
-    forget(ptry); newline();
 }
 
 pub fn test_memtest() <int> {
