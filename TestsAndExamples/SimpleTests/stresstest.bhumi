@@ -214,36 +214,34 @@ pub fn test_mathoptest() <int> {
 
 // ----------------- memtest -----------------
 pub fn allocate_and_free_test() <void> {
-    autoregion {
-        int* ptr1 = malloc(8);
-        int* ptr2 = malloc(8);
-        int* ptr3 = malloc(8);
-        int* ptr4 = malloc(8);
-        int* ptr5 = malloc(8);
+    int* ptr1 = malloc(8);
+    int* ptr2 = malloc(8);
+    int* ptr3 = malloc(8);
+    int* ptr4 = malloc(8);
+    int* ptr5 = malloc(8);
 
-        *ptr1 = 1;
-        *ptr2 = 2;
-        *ptr3 = 3;
+    *ptr1 = 1;
+    *ptr2 = 2;
+    *ptr3 = 3;
 
-        print("Assigned values to first 3 pointers."); newline();
+    print("Assigned values to first 3 pointers."); newline();
 
-        autoregion {
-            int* nested1 = malloc(8);
-            int* nested2 = malloc(8);
-            *nested1 = 100;
-            *nested2 = 200;
-            print("Nested allocations done."); newline();
-        }
+    int* nested1 = malloc(8);
+    int* nested2 = malloc(8);
+    *nested1 = 100;
+    *nested2 = 200;
+    print("Nested allocations done."); newline();
 
-        print("Exited nested autoregion."); newline();
 
-        int* ptr6 = malloc(8);
-        int* ptr7 = malloc(8);
-        *ptr6 = 6;
-        *ptr7 = 7;
+    print("Exited nested autoregion."); newline();
 
-        print("More allocations at top level."); newline();
-    }
+    int* ptr6 = malloc(8);
+    int* ptr7 = malloc(8);
+    *ptr6 = 6;
+    *ptr7 = 7;
+
+    print("More allocations at top level."); newline();
+
     print("Exited top-level autoregion."); newline();
 
     print("Starting crumb autofree test"); newline();
