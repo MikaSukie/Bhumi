@@ -1,0 +1,50 @@
+import C_std;
+
+pin string RESPONSE = "";
+
+fn main() <void> {
+    /* Sudoku 9 rows of 9 columns */
+    int[9] a; int[9] b; int[9] c;
+
+    int[9] d; int[9] e; int[9] f;
+
+    int[9] g; int[9] h; int[9] i;
+
+    while (!streq(RESPONSE, "quit")) {
+        int rendercounter = 0;
+        int renderylevel = 1;
+        RESPONSE = input("User Input: ");
+        newline();
+        if (streq(RESPONSE, "reset")) {
+            int counter = 0;
+        while (counter <= 8) {
+            a[counter] = 0; b[counter] = 0; c[counter] = 0;
+
+            d[counter] = 0; e[counter] = 0; f[counter] = 0;
+
+            g[counter] = 0; h[counter] = 0; i[counter] = 0;
+
+            counter += 1;
+            }
+        }
+
+        while (rendercounter <= 8) {
+            print(tostring(a[rendercounter]) + "  ");
+            print(tostring(b[rendercounter]) + "  ");
+            print(tostring(d[rendercounter]) + " | ");
+            print(tostring(e[rendercounter]) + "  ");
+            print(tostring(c[rendercounter]) + "  ");
+            print(tostring(f[rendercounter]) + " | ");
+            print(tostring(g[rendercounter]) + "  ");
+            print(tostring(h[rendercounter]) + "  ");
+            print(tostring(i[rendercounter]) + "  ");
+            newline();
+            if (renderylevel % 3 == 0 && renderylevel != 9) {
+                print("---------------------------");
+                newline();
+            }
+            renderylevel += 1;
+            rendercounter += 1;
+        }
+    }
+}
