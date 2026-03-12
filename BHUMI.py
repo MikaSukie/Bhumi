@@ -1173,6 +1173,7 @@ _entry_alloca_buf: List[str] = []
 _extern_spill_names: set = set()
 _ar_spilled_ssa_vals: set = set()
 _ar_spill_val_to_name: Dict[str, str] = {}
+_fn_body_remaining: List = []
 _expr_type_cache: Dict[int, str] = {}
 _parse_cache: Dict[str, Any] = {}
 _NOWN_BUILTIN_FUNCS: frozenset = frozenset({
@@ -3497,6 +3498,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 out.append(
                     f"  store {llvm_payload_ty} {payload_val}, {llvm_payload_ty}* {payload_ptr}"
                 )
+                if llvm_payload_ty == "i8*" and not isinstance(expr.args[0], StrLit):
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {payload_val})")
                 return struct_ptr
             bhumi_report_error(
                 None,
@@ -3682,6 +3685,31 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         else:
             tmp2 = new_tmp()
             out.append(f"  {tmp2} = call {ret_ty} @{call_target}({', '.join(args_ir)})")
+            _is_extern_call = (
+                concrete_fn is not None and getattr(concrete_fn, "is_extern", False)
+            ) or (
+                concrete_fn is None
+                and call_target not in (
+                    "llvm.memcpy.p0i8.p0i8.i64", "puts", "strlen",
+                    "exit", "time", "srand", "rand", "usleep", "signal",
+                    "malloc", "free", "bhumi_malloc", "bhumi_free",
+                    "bhumi_safe_c_free", "bhumi_c_free", "bhumi_ffi_free",
+                    "bhumi_tbl_insert", "bhumi_tbl_remove", "bhumi_tbl_contains",
+                    "bhumi_ctbl_insert", "bhumi_ctbl_remove", "bhumi_ctbl_contains",
+                )
+                and not call_target.startswith("bhumi_")
+                and not call_target.startswith("llvm.")
+            )
+            if ret_ty == "i8*" and _is_extern_call:
+                _null_chk = new_tmp()
+                _ins_skip = new_label("ctbl_ins_skip")
+                _ins_do   = new_label("ctbl_ins_do")
+                out.append(f"  {_null_chk} = icmp eq i8* {tmp2}, null")
+                out.append(f"  br i1 {_null_chk}, label %{_ins_skip}, label %{_ins_do}")
+                out.append(f"{_ins_do}:")
+                out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp2})")
+                out.append(f"  br label %{_ins_skip}")
+                out.append(f"{_ins_skip}:")
             for arg_expr, arg_val in zip(expr.args, arg_vals):
                 _maybe_flush_deferred(arg_expr, arg_val)
                 if infer_type(arg_expr) == "string":
@@ -4270,9 +4298,9 @@ def _last_is_terminator(out: List[str]) -> bool:
             or stripped == "unreachable"
         )
     return False
-def _emit_scope_drops(ctx: dict, out: List[str]) -> None:
+def _emit_scope_drops(ctx: dict, out: List[str], force: bool = False) -> None:
     import sys as _sys
-    if _last_is_terminator(out):
+    if not force and _last_is_terminator(out):
         ctx["extra_ir_owned"] = []
         ctx["match_envelopes"] = []
         return
@@ -4353,10 +4381,11 @@ def _emit_scope_drops(ctx: dict, out: List[str]) -> None:
         out.append(f"  {_ir_null} = icmp eq i8* {_ir_cast}, null")
         out.append(f"  br i1 {_ir_null}, label %{_ir_skip}, label %{_ir_free}")
         out.append(f"{_ir_free}:")
-        out.append(f"  call void @bhumi_free(i8* {_ir_cast})")
+        emit_deep_free(_ir_ty, _ir_ptr, out)
         out.append(f"  store {_ir_ty} null, {_ir_ty}* {_ir_addr}")
         out.append(f"  br label %{_ir_skip}")
         out.append(f"{_ir_skip}:")
+        owned_vars.discard(_ir_src)
     ctx["extra_ir_owned"] = []
     for _me_ty, _me_ir, _me_vn in ctx.get("match_envelopes", []):
         _me_addr = _me_ir if _me_ir.startswith("@") else f"%{_me_ir}_addr"
@@ -4370,7 +4399,7 @@ def _emit_scope_drops(ctx: dict, out: List[str]) -> None:
         out.append(f"  {_me_null} = icmp eq i8* {_me_cast}, null")
         out.append(f"  br i1 {_me_null}, label %{_me_skip}, label %{_me_free}")
         out.append(f"{_me_free}:")
-        out.append(f"  call void @bhumi_free(i8* {_me_cast})")
+        emit_deep_free(_me_ty, _me_ptr, out)
         out.append(f"  store {_me_ty} null, {_me_ty}* {_me_addr}")
         out.append(f"  br label %{_me_skip}")
         out.append(f"{_me_skip}:")
@@ -4380,6 +4409,29 @@ def _make_scope_ctx() -> dict:
         "body_decl_names": set(),
         "pre_owned_snapshot": set(owned_vars),
     }
+def _name_used_in_stmts(name: str, stmts) -> bool:
+    """Return True if the variable *name* appears as a Var reference anywhere
+    inside the given list of AST statements.  Used for post-match liveness
+    checks to decide whether the inner-pointer null-store (move semantics)
+    is safe to emit, or whether the matched value must be borrowed instead."""
+    def _walk(node) -> bool:
+        if node is None:
+            return False
+        if isinstance(node, Var) and node.name == name:
+            return True
+        for attr_val in getattr(node, "__dict__", {}).values():
+            if isinstance(attr_val, list):
+                for item in attr_val:
+                    if hasattr(item, "__dict__") and _walk(item):
+                        return True
+            elif hasattr(attr_val, "__dict__"):
+                if _walk(attr_val):
+                    return True
+        return False
+    for s in stmts:
+        if _walk(s):
+            return True
+    return False
 def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
     if isinstance(stmt, VarDecl):
         def _pick_ir_name(name):
@@ -4934,7 +4986,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(f"  {_me_null} = icmp eq i8* {_me_cast}, null")
                     out.append(f"  br i1 {_me_null}, label %{_me_skip}, label %{_me_free}")
                     out.append(f"{_me_free}:")
-                    out.append(f"  call void @bhumi_free(i8* {_me_cast})")
+                    emit_deep_free(_me_ty, _me_ptr, out)
                     out.append(f"  store {_me_ty} null, {_me_ty}* {_me_addr}")
                     out.append(f"  br label %{_me_skip}")
                     out.append(f"{_me_skip}:")
@@ -5317,7 +5369,18 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(
                         f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
+                    _match_subj_owned = False
+                    if isinstance(stmt.expr, Var):
+                        _match_subj_owned = stmt.expr.name in owned_vars
                     if llvm_payload_ty.endswith("*"):
+                        _null_subj_name = stmt.expr.name if isinstance(stmt.expr, Var) else None
+                        _subj_live_after = (
+                            _null_subj_name is not None
+                            and _name_used_in_stmts(_null_subj_name, _fn_body_remaining)
+                        )
+                    else:
+                        _subj_live_after = False
+                    if llvm_payload_ty.endswith("*") and _match_subj_owned and not _subj_live_after:
                         out.append(
                             f"  store {llvm_payload_ty} null, {llvm_payload_ty}* {payload_ptr_cast}"
                         )
@@ -5332,9 +5395,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             _subj_var_name, enum_name, _v_idx, llvm_payload_ty, payload_ptr_cast
                         )
                         binding_source_name[binding_ir] = case.binding
-                    _match_subj_owned = False
-                    if isinstance(stmt.expr, Var):
-                        _match_subj_owned = stmt.expr.name in owned_vars
                     _payload_is_bhumi_obj = (
                         llvm_payload_ty.endswith("*")
                         and (
@@ -5342,13 +5402,13 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             or llvm_payload_ty.startswith("%struct.")
                         )
                     )
-                    if _payload_is_bhumi_obj and _match_subj_owned:
+                    if _payload_is_bhumi_obj and _match_subj_owned and not _subj_live_after:
                         owned_vars.add(case.binding)
                         if scope_drop_stack:
                             scope_drop_stack[-1].setdefault(
                                 "extra_ir_owned", []
                             ).append((binding_ir, llvm_payload_ty, case.binding))
-                    elif llvm_payload_ty == "i8*" and _match_subj_owned:
+                    elif llvm_payload_ty == "i8*" and _match_subj_owned and not _subj_live_after:
                         owned_vars.add(case.binding)
                         if scope_drop_stack:
                             scope_drop_stack[-1].setdefault(
@@ -5402,7 +5462,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         out.append(f"  {_env_null_tmp} = icmp eq i8* {_env_cast}, null")
                         out.append(f"  br i1 {_env_null_tmp}, label %{_env_done_lbl}, label %{_env_free_lbl}")
                         out.append(f"{_env_free_lbl}:")
-                        out.append(f"  call void @bhumi_free(i8* {_env_cast})")
+                        emit_deep_free(_subj_llvm_ty, _env_ptr, out)
                         out.append(f"  store {_subj_llvm_ty} null, {_subj_llvm_ty}* {_env_addr}")
                         out.append(f"  br label %{_env_done_lbl}")
                         out.append(f"{_env_done_lbl}:")
@@ -5595,15 +5655,19 @@ def gen_func(fn: Func) -> List[str]:
     has_return = False
     _fn_scope_ctx = _make_scope_ctx()
     scope_drop_stack.append(_fn_scope_ctx)
-    for stmt in fn.body or []:
+    _body_list = list(fn.body or [])
+    for _stmt_idx, stmt in enumerate(_body_list):
+        global _fn_body_remaining
+        _fn_body_remaining = _body_list[_stmt_idx + 1:]
         if isinstance(stmt, ReturnStmt):
             gen_stmt(stmt, out, ret_ty)
             has_return = True
             break
         else:
             gen_stmt(stmt, out, ret_ty)
+    _fn_body_remaining = []
     if not has_return:
-        _emit_scope_drops(_fn_scope_ctx, out)
+        _emit_scope_drops(_fn_scope_ctx, out, force=True)
     if scope_drop_stack:
         scope_drop_stack.pop()
     if _entry_alloca_buf:
@@ -5991,6 +6055,9 @@ def compile_program(prog: Program) -> str:
     func_table["bhumi_tbl_insert"] = "void"
     func_table["bhumi_tbl_remove"] = "void"
     func_table["bhumi_tbl_contains"] = "i1"
+    func_table["bhumi_ctbl_insert"] = "void"
+    func_table["bhumi_ctbl_remove"] = "void"
+    func_table["bhumi_ctbl_contains"] = "i1"
     func_table["puts"] = "i32"
     func_table["strlen"] = "i64"
     func_table["bhumi_argc"] = "i64"
@@ -6322,21 +6389,187 @@ is_c_alloc:
 done:
   ret void
 }
+@.bhumi_ctbl_ptr = global i8** null
+@.bhumi_ctbl_cap = global i64 0
+@.bhumi_ctbl_cnt = global i64 0
+define void @bhumi_ctbl_raw_insert(i8** %slots, i64 %cap, i8* %ptr) {
+entry:
+  %mask = sub i64 %cap, 1
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %probe
+probe:
+  %slot = phi i64 [ %hash, %entry ], [ %next_wrap, %occupied ]
+  %ep = getelementptr i8*, i8** %slots, i64 %slot
+  %cur = load i8*, i8** %ep
+  %is_empty = icmp eq i8* %cur, null
+  br i1 %is_empty, label %do_store, label %occupied
+occupied:
+  %next = add i64 %slot, 1
+  %next_wrap = and i64 %next, %mask
+  br label %probe
+do_store:
+  store i8* %ptr, i8** %ep
+  ret void
+}
+define void @bhumi_ctbl_grow(i64 %newcap) {
+entry:
+  %nbytes = mul i64 %newcap, 8
+  %raw = call i8* @malloc(i64 %nbytes)
+  %new_slots = bitcast i8* %raw to i8**
+  br label %zero_loop
+zero_loop:
+  %zi = phi i64 [ 0, %entry ], [ %zi_next, %zero_loop ]
+  %zep = getelementptr i8*, i8** %new_slots, i64 %zi
+  store i8* null, i8** %zep
+  %zi_next = add i64 %zi, 1
+  %zi_done = icmp eq i64 %zi_next, %newcap
+  br i1 %zi_done, label %rehash, label %zero_loop
+rehash:
+  %old_slots = load i8**, i8*** @.bhumi_ctbl_ptr
+  %old_cap   = load i64, i64* @.bhumi_ctbl_cap
+  %old_null  = icmp eq i8** %old_slots, null
+  br i1 %old_null, label %rehash_done, label %rehash_loop
+rehash_loop:
+  %ri = phi i64 [ 0, %rehash ], [ %ri_next, %rehash_cont ]
+  %rep = getelementptr i8*, i8** %old_slots, i64 %ri
+  %rval = load i8*, i8** %rep
+  %r_empty = icmp eq i8* %rval, null
+  br i1 %r_empty, label %rehash_cont, label %do_reinsert
+do_reinsert:
+  call void @bhumi_ctbl_raw_insert(i8** %new_slots, i64 %newcap, i8* %rval)
+  br label %rehash_cont
+rehash_cont:
+  %ri_next = add i64 %ri, 1
+  %ri_done = icmp eq i64 %ri_next, %old_cap
+  br i1 %ri_done, label %free_old, label %rehash_loop
+free_old:
+  %old_raw = bitcast i8** %old_slots to i8*
+  call void @free(i8* %old_raw)
+  br label %rehash_done
+rehash_done:
+  store i8** %new_slots, i8*** @.bhumi_ctbl_ptr
+  store i64 %newcap,     i64*  @.bhumi_ctbl_cap
+  ret void
+}
+define void @bhumi_ctbl_ensure_init() {
+entry:
+  %cap = load i64, i64* @.bhumi_ctbl_cap
+  %need_init = icmp eq i64 %cap, 0
+  br i1 %need_init, label %do_init, label %done
+do_init:
+  call void @bhumi_ctbl_grow(i64 64)
+  br label %done
+done:
+  ret void
+}
+define void @bhumi_ctbl_insert(i8* %ptr) {
+entry:
+  %is_null = icmp eq i8* %ptr, null
+  br i1 %is_null, label %done, label %do_insert
+do_insert:
+  call void @bhumi_ctbl_ensure_init()
+  %cnt = load i64, i64* @.bhumi_ctbl_cnt
+  %cap = load i64, i64* @.bhumi_ctbl_cap
+  %cnt4 = mul i64 %cnt, 4
+  %cap3 = mul i64 %cap, 3
+  %overload = icmp uge i64 %cnt4, %cap3
+  br i1 %overload, label %do_grow, label %insert_now
+do_grow:
+  %newcap = mul i64 %cap, 2
+  call void @bhumi_ctbl_grow(i64 %newcap)
+  br label %insert_now
+insert_now:
+  %slots = load i8**, i8*** @.bhumi_ctbl_ptr
+  %cap2  = load i64, i64* @.bhumi_ctbl_cap
+  call void @bhumi_ctbl_raw_insert(i8** %slots, i64 %cap2, i8* %ptr)
+  %cnt2 = load i64, i64* @.bhumi_ctbl_cnt
+  %cnt3 = add i64 %cnt2, 1
+  store i64 %cnt3, i64* @.bhumi_ctbl_cnt
+  br label %done
+done:
+  ret void
+}
+define i1 @bhumi_ctbl_contains(i8* %ptr) {
+entry:
+  %is_null = icmp eq i8* %ptr, null
+  br i1 %is_null, label %ret_false, label %check_init
+check_init:
+  %cap = load i64, i64* @.bhumi_ctbl_cap
+  %no_cap = icmp eq i64 %cap, 0
+  br i1 %no_cap, label %ret_false, label %do_probe
+do_probe:
+  %mask = sub i64 %cap, 1
+  %slots = load i8**, i8*** @.bhumi_ctbl_ptr
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %probe
+probe:
+  %slot = phi i64 [ %hash, %do_probe ], [ %next_wrap, %cont ]
+  %ep = getelementptr i8*, i8** %slots, i64 %slot
+  %cur = load i8*, i8** %ep
+  %is_empty = icmp eq i8* %cur, null
+  br i1 %is_empty, label %ret_false, label %check_match
+check_match:
+  %match = icmp eq i8* %cur, %ptr
+  br i1 %match, label %ret_true, label %cont
+cont:
+  %next = add i64 %slot, 1
+  %next_wrap = and i64 %next, %mask
+  br label %probe
+ret_true:
+  ret i1 1
+ret_false:
+  ret i1 0
+}
+define void @bhumi_ctbl_remove(i8* %ptr) {
+entry:
+  %cap = load i64, i64* @.bhumi_ctbl_cap
+  %is_empty_tbl = icmp eq i64 %cap, 0
+  br i1 %is_empty_tbl, label %not_found, label %do_remove
+do_remove:
+  %mask = sub i64 %cap, 1
+  %slots = load i8**, i8*** @.bhumi_ctbl_ptr
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %find_loop
+find_loop:
+  %fi = phi i64 [ %hash, %do_remove ], [ %fwrap, %find_cont ]
+  %fep = getelementptr i8*, i8** %slots, i64 %fi
+  %fcur = load i8*, i8** %fep
+  %is_null = icmp eq i8* %fcur, null
+  br i1 %is_null, label %not_found, label %check_match
+check_match:
+  %match = icmp eq i8* %fcur, %ptr
+  br i1 %match, label %found, label %find_cont
+find_cont:
+  %fnext = add i64 %fi, 1
+  %fwrap = and i64 %fnext, %mask
+  br label %find_loop
+found:
+  store i8* null, i8** %fep
+  %cnt_r = load i64, i64* @.bhumi_ctbl_cnt
+  %cnt_r1 = sub i64 %cnt_r, 1
+  store i64 %cnt_r1, i64* @.bhumi_ctbl_cnt
+  ret void
+not_found:
+  ret void
+}
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
   br i1 %is_null, label %done, label %check_bhumi
 check_bhumi:
   %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
-  br i1 %is_bhumi, label %do_bhumi_free, label %check_heap
+  br i1 %is_bhumi, label %do_bhumi_free, label %check_ctbl
 do_bhumi_free:
   call void @bhumi_free(i8* %userptr)
   br label %done
-check_heap:
-  %usable = call i64 @malloc_usable_size(i8* %userptr)
-  %is_heap = icmp ugt i64 %usable, 0
-  br i1 %is_heap, label %do_c_free, label %done
+check_ctbl:
+  %is_c = call i1 @bhumi_ctbl_contains(i8* %userptr)
+  br i1 %is_c, label %do_c_free, label %done
 do_c_free:
+  call void @bhumi_ctbl_remove(i8* %userptr)
   call void @free(i8* %userptr)
   br label %done
 done:
@@ -6551,24 +6784,20 @@ define i1 @bhumi_tbl_contains(i8* %ptr) {
 entry:
   ret i1 0
 }
+define void @bhumi_ctbl_insert(i8* %ptr) {
+entry:
+  ret void
+}
+define void @bhumi_ctbl_remove(i8* %ptr) {
+entry:
+  ret void
+}
+define i1 @bhumi_ctbl_contains(i8* %ptr) {
+entry:
+  ret i1 0
+}
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
-  %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %done, label %check_bhumi
-check_bhumi:
-  %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
-  br i1 %is_bhumi, label %do_bhumi_free, label %check_heap
-do_bhumi_free:
-  call void @bhumi_free(i8* %userptr)
-  br label %done
-check_heap:
-  %usable = call i64 @malloc_usable_size(i8* %userptr)
-  %is_heap = icmp ugt i64 %usable, 0
-  br i1 %is_heap, label %do_c_free, label %done
-do_c_free:
-  call void @free(i8* %userptr)
-  br label %done
-done:
   ret void
 }
 define i64 @bhumi_alloc_size(i8* %userptr) {
