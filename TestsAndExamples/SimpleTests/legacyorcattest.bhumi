@@ -1,0 +1,157 @@
+import C_std;
+
+pin string res;
+
+pub fn main() <int> {
+    // arg getter
+    string arg1 = bhumi_argv(1);
+    // arg cases
+    if (streq(tal(arg1), "help") || streq(tal(arg1), "h") || streq(tal(arg1), "-h")) {
+        print("available commands:"); newline();
+        print("> ossemble, help, update"); newline();
+    }
+    else if (streq(tal(arg1), "ossemble")) {
+        // user cases
+        arg1 = "";
+        print(empty() + "OS override? system detected: " + get_os() + ">>: ");
+        res = input("");
+        if (streq(tal(res), "y")) {
+            print("override not yet implemented");newline();
+            exit(0);
+        }
+        else {
+            print("continuing");newline();
+            if (streq(get_os(), "linux")) {
+                linpreinstall();
+            }
+        }
+    } else if (streq(tal(arg1), "update")) {
+        self_update();
+    } else if (streq(tal(arg1), "null")) {
+        print(empty() + "please type an argument. EX: -h, ossemble, update."); newline();
+    } else {
+        print(empty() + "Your argument: \"" + tostr(arg1) + "\" either does not exist or is a typo."); newline();
+    }
+    return 0;
+}
+
+pub fn linpreinstall() <void> {
+    // preinstall instructions
+    print("Please make sure wget is installed on your system.");newline();
+    res = input(empty() + "Are you in your desired directory? ");newline();
+    if (streq(tal(res), "y") || streq(tal(res), "yes")) {
+        res = input(empty() + "make a sub env directory? (will be named ocatenv): ");newline();
+        if (streq(tal(res), "y") || streq(tal(res), "yes")) {
+            lininstall(true);
+        } else {
+            lininstall(false);
+        }
+    } else {
+        print("quitting... since not in desired dir.");
+        exit(0);
+    }
+}
+
+pub fn lininstall(bool mkdir) <void> {
+    if (mkdir == false) {
+    // install the compiler
+        print("Installing into current directory..."); newline();
+        system("wget -O ORCC.bin https://github.com/MikaSukie/Orcat-Lang/releases/download/ORCC-mainstream/ORCC.bin");newline();
+
+        res = input(empty() + "Do you want default libs with the compiler? ");
+        if (streq(tal(res), "y") || streq(tal(res), "yes")) {
+            linlibinstall();
+            asklaunchscript(false);
+        } else {
+            asklaunchscript(false);
+        }
+    } else {
+        print("Installing into ./ocatenv/..."); newline();
+        system("mkdir ocatenv && cd ocatenv && wget -O ORCC.bin https://github.com/MikaSukie/Orcat-Lang/releases/download/ORCC-mainstream/ORCC.bin");newline();
+        res = input(empty() + "Do you want default libs with the compiler? ");
+        if (streq(tal(res), "y") || streq(tal(res), "yes")) {
+            system("cd ocatenv && wget -O stdlib.c https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/stdlib.c && wget -O C_io.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_io.sorcat && wget -O C_fileio.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_fileio.sorcat && wget -O C_mem.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_mem.sorcat && wget -O C_types.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_types.sorcat && wget -O std.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/std.sorcat && wget -O C_union.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_union.sorcat");newline();
+            asklaunchscript(true);
+        } else {
+            asklaunchscript(true);
+        }
+    }
+}
+
+pub fn asklaunchscript(bool dir) <void> {
+    res = input(empty() + "\n" + "Do you want launch script (templates)? (will install according to OS.): ");
+    if (streq(tal(res), "y") || streq(tal(res), "yes")) {
+        if (dir == true) { launchtempinstall(true); }
+        else { launchtempinstall(false); }
+    } else {
+        thanks();
+        exit(0);
+    }
+}
+
+pub fn launchtempinstall(bool dir) <void> {
+    if (dir == true) {
+        if (streq(get_os(), "linux")) {
+            system("cd ocatenv && wget -O compile.sh https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/compile.sh && wget -O Rcompile.sh https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/Rcompile.sh");
+            thanks();
+            exit(0);
+        } else if (streq(get_os(), "windows")) {
+            system("cd ocatenv && wget -O compile.bat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/compile.bat && wget -O Rcompile.bat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/Rcompile.bat");
+            thanks();
+            exit(0);
+        }
+    } else {
+        if (streq(get_os(), "linux")) {
+            system("wget -O compile.sh https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/compile.sh && wget -O Rcompile.sh https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/Rcompile.sh");
+            thanks();
+            exit(0);
+        } else if (streq(get_os(), "windows")) {
+            system("wget -O compile.bat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/compile.bat && wget -O Rcompile.bat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/Rcompile.bat");
+            thanks();
+            exit(0);
+        }
+    }
+}
+
+pub fn thanks() <void> {
+    system("find . -type f -exec chmod +x {} \\;");
+    print("Thanks for downloading ORCat Language! Have fun!"); newline();
+    print("   ____  _____   _____      _   "); newline();
+    print("  / __ \\|  __ \\ / ____|    | |  "); newline();
+    print(" | |  | | |__) | |     __ _| |_ "); newline();
+    print(" | |  | |  _  /| |    / _` | __|"); newline();
+    print(" | |__| | | \\ \\| |___| (_| | |_ "); newline();
+    print("  \\____/|_|  \\_\\\\_____\\__,_|\\__|"); newline();
+}
+
+pub fn linlibinstall() <void> {
+    print("[IMPORTANT] MAKE SURE WGET is installed!"); newline();
+    // C libs and C extern references
+    system("wget -O stdlib.c https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/stdlib.c && wget -O C_io.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_io.sorcat && wget -O C_fileio.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_fileio.sorcat && wget -O C_types.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_types.sorcat && wget -O std.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/std.sorcat && wget -O C_union.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_union.sorcat");
+}
+
+pub fn self_update() <void> {
+    print("Preparing background updater..."); newline();
+
+    // Build updater script using string builder
+    string code = sb_create();
+    code = sb_append_str(code, "#!/bin/sh\n");
+    code = sb_append_str(code, "sleep 1\n");
+    code = sb_append_str(code, "echo '[UPDATER] Replacing ocat...'\n");
+    code = sb_append_str(code, "wget -O ocat https://github.com/MikaSukie/Orcat-Lang/releases/download/ORCC-BETA-NEWGEN/ocatl\n");
+    code = sb_append_str(code, "chmod +x ocat\n");
+    code = sb_append_str(code, "echo '[UPDATER] Update complete. Press enter to exit.'\n");
+    string script = sb_finish(code);
+
+    // Write to file using C_fileio
+    if (!write_file("ocat_updater.sh", script)) {
+        print("Failed to write updater script."); newline();
+        return;
+    }
+
+    // Make executable and run it in the background
+    system("chmod +x ocat_updater.sh && ./ocat_updater.sh &");
+
+    print("Update started in background. Exiting current ocat..."); newline();
+    exit(0);
+}
