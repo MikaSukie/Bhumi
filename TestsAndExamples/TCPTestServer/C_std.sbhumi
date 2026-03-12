@@ -1,11 +1,11 @@
 /* start of STDLIB */
 pub extern fn sb_create()                            <string>;
-pub extern fn sb_append_str(string b, string s)      <string>;
-pub extern fn sb_append_int(string b, int x)         <string>;
-pub extern fn sb_append_float(string b, float f)     <string>;
-pub extern fn sb_append_bool(string b, bool bb)      <string>;
-pub extern fn sb_append_float32(string b, float32 f) <string>;
-pub extern fn sb_finish(string b)                    <string>;
+pub extern fn sb_append_str(take string b, string s)      <string>;
+pub extern fn sb_append_int(take string b, int x)         <string>;
+pub extern fn sb_append_float(take string b, float f)     <string>;
+pub extern fn sb_append_bool(take string b, bool bb)      <string>;
+pub extern fn sb_append_float32(take string b, float32 f) <string>;
+pub extern fn sb_finish(take string b)                    <string>;
 
 pub extern fn itostr(int i)    <string>;
 pub extern fn i8tostr(int8 i)    <string>;
@@ -63,6 +63,8 @@ pub fn input(string s) <#> {
 pub extern fn print(string s)  <void>;
 pub extern fn eprint(string s) <void>;
 
+pub extern fn read_file(string path) <string>;
+pub extern fn file_exists(string path) <bool>;
 pub extern fn write_file(string path, string content) <bool>;
 pub extern fn append_file(string path, string content) <bool>;
 pub extern fn read_lines(string path) <string>;
@@ -157,7 +159,7 @@ pub extern fn Uget_string(int h)   <string>;
 
 pub extern fn Ufree_union(int h)     <void>;
 
-fn empty() <string> { return""; }
+fn empty() <string> { return sb_create(); }
 
 enum Exist<T> {
   None;
@@ -167,4 +169,19 @@ enum Exist<T> {
 enum Respond<T, E> { 
     Ok(T);
     Err(E);
+}
+
+pub fn try_read_file(Exist<string> path) <Respond<string, string>> {
+    match (path) {
+        Some(p) {
+            if (file_exists(p)) {
+                return Respond->Ok(read_file(p));
+            } else {
+                return Respond->Err("Error reading file");
+            }
+        }
+        None {
+            return Respond->Err("No path given");
+        }
+    }
 }
