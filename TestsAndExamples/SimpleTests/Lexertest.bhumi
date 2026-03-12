@@ -2,72 +2,74 @@ import C_std;
 
 fn main() <void> {
     printnl("READ FILE TEST");
-    autoregion {
-        string sourcefile = try_read_file("main.bhumi");
-        int index = -1;
-        printnl(tostring(charat(index, sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
-        printnl(tostring(charat(slength(sourcefile) , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
-		printnl(tostring(charat(slength(sourcefile) + 1 , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
-        newline();
-        // printnl(sourcefile);
-    }
+    string sourcefile = get_source();
+    int index = -1;
+    printnl(tostring(charat(index, sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
+    printnl(tostring(charat(slength(sourcefile) , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
+    printnl(tostring(charat(slength(sourcefile) + 1 , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
+    newline();
+    // printnl(sourcefile);
 
     printnl("GET MAX LENGTH TEST");
-    autoregion {
-        string sourcefile = try_read_file("main.bhumi");
-        int index = 0;
-        while (!streq(charat(index, sourcefile), "EOF")) {
-            index += 1;
-        }
-        printnl("index: " + tostring(index));
-        newline();
+    index = 0;
+    while (!streq(charat(index, sourcefile), "EOF")) {
+        index += 1;
     }
+    printnl("index: " + tostring(index));
+    newline();
 
     printnl("DETECT KEYWORDS");
-    autoregion {
-        string buf = sb_create();
-        string sourcefile = try_read_file("main.bhumi");
-        int index = 0;
-        int buflength = 0;
-        while (!streq(charat(index, sourcefile), "EOF")) {
-            while (!isspace_at(index, sourcefile) && isalnum_at(index, sourcefile)) {
-                buf = sb_append_str(buf, charat(index, sourcefile));
-                index += 1;
-            }
-            buf = sb_finish(buf);
-            buflength = slength(buf);
-            if (buflength > 1 &&
-                !streq(charat(index - buflength - 1, sourcefile), "_"))
-            {
-                print(tac(buf));
-                print(" | index: " + tostring(index) + " | kw length: " + tostring(buflength) + "\n");
-            }
-            while (!isalnum_at(index, sourcefile) &&
-                  !streq(charat(index, sourcefile), "EOF") ||
-                  isspace_at(index, sourcefile))
-            {
-                index += 1;
-            }
-            buf = sb_create();
+    string buf = sb_create();
+    index = 0;
+    int buflength = 0;
+    while (!streq(charat(index, sourcefile), "EOF")) {
+        while (!isspace_at(index, sourcefile) && isalnum_at(index, sourcefile)) {
+            buf = sb_append_str(buf, charat(index, sourcefile));
+            index += 1;
         }
+        buf = sb_finish(buf);
+        buflength = slength(buf);
+        if (buflength > 1 &&
+            !streq(charat(index - buflength - 1, sourcefile), "_"))
+        {
+            print(tac(buf));
+            print(" | index: " + tostring(index) + " | kw length: " + tostring(buflength) + "\n");
+        }
+        while (!isalnum_at(index, sourcefile) &&
+                !streq(charat(index, sourcefile), "EOF") ||
+                isspace_at(index, sourcefile))
+        {
+            index += 1;
+        }
+        buf = sb_create();
     }
 
     printnl("NEWLINE DETECTION");
-    autoregion {
-        int index = 0;
-        int nlc = 0;
-        string sourcefile = try_read_file("main.bhumi");
-        while (!streq(charat(index, sourcefile), "EOF")) {
-            index += 1;
-            if (streq(charat(index, sourcefile), "NL")) {
-                nlc += 1;
-            }
+    index = 0;
+    int nlc = 0;
+    while (!streq(charat(index, sourcefile), "EOF")) {
+        index += 1;
+        if (streq(charat(index, sourcefile), "NL")) {
+            nlc += 1;
+        }
+    }
+
+    printnl(tostring(nlc) + " newlines");
+
+}
+
+fn get_source() <string> {
+    Respond<string, string> s = try_read_file(Exist->Some("main.bhumi"));
+    match (s) {
+        Ok(e) {
+            return e;
         }
 
-        printnl(tostring(nlc) + " newlines");
+        Err(f) { print(f); }
     }
 
 }
+
 
 // ─── String Builder example ────────────────────────────────────────────────
     /*
