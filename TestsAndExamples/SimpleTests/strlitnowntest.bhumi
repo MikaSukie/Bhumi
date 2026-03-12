@@ -1,0 +1,13 @@
+import C_std;
+
+fn main() <void> {
+    string s = test_literal();
+}
+
+extern nown fn test_literal() <string>;
+
+/*
+const char* test_literal(void) {
+    return "hello";
+}
+*/
