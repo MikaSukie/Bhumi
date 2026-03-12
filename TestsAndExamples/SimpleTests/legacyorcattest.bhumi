@@ -13,7 +13,7 @@ pub fn main() <int> {
     else if (streq(tal(arg1), "ossemble")) {
         // user cases
         arg1 = "";
-        print(empty() + "OS override? system detected: " + get_os() + ">>: ");
+        print("OS override? system detected: " + get_os() + ">>: ");
         res = input("");
         if (streq(tal(res), "y")) {
             print("override not yet implemented");newline();
@@ -28,9 +28,9 @@ pub fn main() <int> {
     } else if (streq(tal(arg1), "update")) {
         self_update();
     } else if (streq(tal(arg1), "null")) {
-        print(empty() + "please type an argument. EX: -h, ossemble, update."); newline();
+        print("please type an argument. EX: -h, ossemble, update."); newline();
     } else {
-        print(empty() + "Your argument: \"" + tostr(arg1) + "\" either does not exist or is a typo."); newline();
+        print("Your argument: \"" + tostr(arg1) + "\" either does not exist or is a typo."); newline();
     }
     return 0;
 }
@@ -38,9 +38,9 @@ pub fn main() <int> {
 pub fn linpreinstall() <void> {
     // preinstall instructions
     print("Please make sure wget is installed on your system.");newline();
-    res = input(empty() + "Are you in your desired directory? ");newline();
+    res = input("Are you in your desired directory? ");newline();
     if (streq(tal(res), "y") || streq(tal(res), "yes")) {
-        res = input(empty() + "make a sub env directory? (will be named ocatenv): ");newline();
+        res = input("make a sub env directory? (will be named ocatenv): ");newline();
         if (streq(tal(res), "y") || streq(tal(res), "yes")) {
             lininstall(true);
         } else {
@@ -58,7 +58,7 @@ pub fn lininstall(bool mkdir) <void> {
         print("Installing into current directory..."); newline();
         system("wget -O ORCC.bin https://github.com/MikaSukie/Orcat-Lang/releases/download/ORCC-mainstream/ORCC.bin");newline();
 
-        res = input(empty() + "Do you want default libs with the compiler? ");
+        res = input("Do you want default libs with the compiler? ");
         if (streq(tal(res), "y") || streq(tal(res), "yes")) {
             linlibinstall();
             asklaunchscript(false);
@@ -68,7 +68,7 @@ pub fn lininstall(bool mkdir) <void> {
     } else {
         print("Installing into ./ocatenv/..."); newline();
         system("mkdir ocatenv && cd ocatenv && wget -O ORCC.bin https://github.com/MikaSukie/Orcat-Lang/releases/download/ORCC-mainstream/ORCC.bin");newline();
-        res = input(empty() + "Do you want default libs with the compiler? ");
+        res = input("Do you want default libs with the compiler? ");
         if (streq(tal(res), "y") || streq(tal(res), "yes")) {
             system("cd ocatenv && wget -O stdlib.c https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/stdlib.c && wget -O C_io.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_io.sorcat && wget -O C_fileio.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_fileio.sorcat && wget -O C_mem.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_mem.sorcat && wget -O C_types.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_types.sorcat && wget -O std.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/std.sorcat && wget -O C_union.sorcat https://raw.githubusercontent.com/MikaSukie/Orcat-Lang/main/C_union.sorcat");newline();
             asklaunchscript(true);
@@ -79,7 +79,7 @@ pub fn lininstall(bool mkdir) <void> {
 }
 
 pub fn asklaunchscript(bool dir) <void> {
-    res = input(empty() + "\n" + "Do you want launch script (templates)? (will install according to OS.): ");
+    res = input("\n" + "Do you want launch script (templates)? (will install according to OS.): ");
     if (streq(tal(res), "y") || streq(tal(res), "yes")) {
         if (dir == true) { launchtempinstall(true); }
         else { launchtempinstall(false); }
