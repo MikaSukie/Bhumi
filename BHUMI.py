@@ -97,20 +97,20 @@ class Token:
     line: int
     col: int
 KEYWORDS = {
-    "fn",       "if",        "else",      "while",     "return",    "import",
-    "pub",      "priv",      "prot",      "extern",
-    "int",      "int8",      "int16",     "int32",     "int64",
-    "uint",     "uint8",     "uint16",    "uint32",    "uint64",
-    "float",    "float32",
-    "bool",     "char",      "string",    "void",
-    "true",     "false",     "null",
-    "struct",   "enum",      "match",
-    "async",    "await",     "vasync",    "vawait",
-    "continue", "break",
-    "nomd",     "pin",       "crumble",
+    "fn",        "if",        "else",      "while",     "return",    "import",
+    "pub",       "priv",      "prot",      "extern",
+    "int",       "int8",      "int16",     "int32",     "int64",
+    "uint",      "uint8",     "uint16",    "uint32",    "uint64",
+    "float",     "float32",
+    "bool",      "char",      "string",    "void",
+    "true",      "false",     "null",
+    "struct",    "enum",      "match",
+    "async",     "await",     "vasync",    "vawait",
+    "continue",  "break",
+    "nomd",      "pin",       "crumble",
     "nown",
+    "take",      "except",
     "typeswitch","typecase", "fallback",
-    "autoregion",
 }
 SINGLE_CHARS = {
     "(": "LPAREN",   ")": "RPAREN",
@@ -567,6 +567,7 @@ def ensure_monomorph_call(
         base_fn.is_extern,
         base_fn.is_async,
     )
+    new_fn.take_params = set(getattr(base_fn, "take_params", None) or set())
     all_funcs.append(new_fn)
     _func_name_map[new_fn.name] = new_fn
     if new_ret == "#":
@@ -1127,9 +1128,6 @@ class AwaitExpr(Expr):
 class VAwaitExpr(Expr):
     expr: Expr
 @dataclass
-class AutoRegion(Stmt):
-    body: List[Stmt]
-@dataclass
 class Func:
     access: str
     name: str
@@ -1144,11 +1142,14 @@ class Func:
     _vasync_captured: Optional[set] = None
     is_variadic: bool = False
     is_nown: bool = False
+    take_params: Optional[set] = None
     def __post_init__(self):
         if self.vasync_except is None:
             self.vasync_except = []
         else:
             self.vasync_except = list(self.vasync_except)
+        if self.take_params is None:
+            self.take_params = set()
 @dataclass
 class Program:
     funcs: List[Func]
@@ -1165,12 +1166,23 @@ enum_variant_map: Dict[str, List[Tuple[str, Optional[str]]]] = {}
 loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
-autoregion_stack: List[Dict[str, object]] = []
+scope_drop_stack: List[Dict[str, object]] = []
 binding_enum_payload: Dict[str, tuple] = {}
 binding_source_name: Dict[str, str] = {}
 _entry_alloca_buf: List[str] = []
+_extern_spill_names: set = set()
+_ar_spilled_ssa_vals: set = set()
+_ar_spill_val_to_name: Dict[str, str] = {}
 _expr_type_cache: Dict[int, str] = {}
 _parse_cache: Dict[str, Any] = {}
+_NOWN_BUILTIN_FUNCS: frozenset = frozenset({
+    "bhumi_argv",
+})
+_FREE_ARG_FUNS: frozenset = frozenset({
+    "free_str",
+    "Ufree_union",
+    "bhumi_c_free",
+})
 mono_map: Dict[str, str] = {}
 class Parser:
     def __init__(self, tokens: List[Token]):
@@ -1502,8 +1514,13 @@ class Parser:
         variadic = False
         self.expect("LPAREN")
         params: List[Tuple[str, str]] = []
+        take_indices: set = set()
         if self.peek().kind != "RPAREN":
             while True:
+                is_take = False
+                if self.peek().kind == "TAKE":
+                    is_take = True
+                    self.bump()
                 prefix_amp = False
                 if self.peek().kind == "AMP":
                     self.bump()
@@ -1527,6 +1544,8 @@ class Parser:
                         )
                     pname = p_tok.value
                     params.append((typ, pname))
+                    if is_take:
+                        take_indices.add(len(params) - 1)
                 else:
                     bhumi_report_error(
                         self.peek().line,
@@ -1580,6 +1599,7 @@ class Parser:
                 is_variadic=variadic,
             )
             fn_ext.is_nown = is_nown
+            fn_ext.take_params = take_indices
             return fn_ext
         self.expect("LBRACE")
         body = self.parse_block()
@@ -1598,6 +1618,7 @@ class Parser:
             is_variadic=variadic,
         )
         fn_reg.is_nown = is_nown
+        fn_reg.take_params = take_indices
         return fn_reg
     def parse_block(self) -> List[Stmt]:
         stmts = []
@@ -1644,8 +1665,6 @@ class Parser:
             or t.kind == "IDENT"
         ):
             return self.parse_var_decl()
-        if t.kind == "AUTOREGION":
-            return self.parse_autoregion()
         if t.kind == "IF":
             return self.parse_if()
         if t.kind == "WHILE":
@@ -1732,12 +1751,6 @@ class Parser:
         lhs_var = Var(name)
         binop = BinOp(op, lhs_var, expr)
         return Assign(name, binop)
-    def parse_autoregion(self) -> AutoRegion:
-        self.expect("AUTOREGION")
-        self.expect("LBRACE")
-        body = self.parse_block()
-        self.expect("RBRACE")
-        return AutoRegion(body=body)
     def parse_crumble(self) -> CrumbleStmt:
         self.expect("LPAREN")
         var_name = self.expect("IDENT").value
@@ -2164,6 +2177,68 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         )
     def format_float(val: float) -> str:
         return f"{val:.8e}"
+    def _is_heap_string_temp(e: Expr) -> bool:
+        if isinstance(e, BinOp) and e.op == "+" and infer_type(e) == "string":
+            return True
+        if isinstance(e, Call):
+            if e.name in _NOWN_BUILTIN_FUNCS:
+                return False
+            callee_fn = _func_name_map.get(e.name)
+            if callee_fn is not None and getattr(callee_fn, "is_nown", False):
+                return False
+            return infer_type(e) == "string"
+        return False
+    def _emit_free_if_temp(e: Expr, ssa_val: str) -> None:
+        if not _is_heap_string_temp(e):
+            return
+        if ssa_val is None:
+            return
+        if ssa_val in _ar_spilled_ssa_vals:
+            _spill_nm = _ar_spill_val_to_name.get(ssa_val)
+            if _spill_nm is None:
+                return
+            _spill_res = symbol_table.lookup(_spill_nm)
+            if _spill_res is None:
+                return
+            _spill_llvm, _ir_name = _spill_res
+            _addr = f"@{_ir_name}" if _ir_name.startswith("@") else f"%{_ir_name}_addr"
+            _ld = new_tmp()
+            out.append(f"  {_ld} = load {_spill_llvm}, {_spill_llvm}* {_addr}")
+            _cast = new_tmp()
+            out.append(f"  {_cast} = bitcast {_spill_llvm} {_ld} to i8*")
+            _isnull = new_tmp()
+            out.append(f"  {_isnull} = icmp eq i8* {_cast}, null")
+            _skiplbl = new_label("tmp_free_skip")
+            _dolbl   = new_label("tmp_free_do")
+            out.append(f"  br i1 {_isnull}, label %{_skiplbl}, label %{_dolbl}")
+            out.append(f"{_dolbl}:")
+            out.append(f"  call void @bhumi_safe_c_free(i8* {_cast})")
+            out.append(f"  br label %{_skiplbl}")
+            out.append(f"{_skiplbl}:")
+            out.append(f"  store {_spill_llvm} null, {_spill_llvm}* {_addr}")
+            owned_vars.discard(_spill_nm)
+            for _sctx in scope_drop_stack:
+                _sctx.get("body_decl_names", set()).discard(_spill_nm)
+                _sctx.get("extra_ir_owned", [])
+            return
+        _ft = new_tmp()
+        out.append(f"  {_ft} = icmp eq i8* {ssa_val}, null")
+        _fskip = new_label("tmp_free_skip")
+        _fdo   = new_label("tmp_free_do")
+        out.append(f"  br i1 {_ft}, label %{_fskip}, label %{_fdo}")
+        out.append(f"{_fdo}:")
+        out.append(f"  call void @bhumi_safe_c_free(i8* {ssa_val})")
+        out.append(f"  br label %{_fskip}")
+        out.append(f"{_fskip}:")
+        _spill_nm = _ar_spill_val_to_name.get(ssa_val)
+        if _spill_nm is not None:
+            _spill_res = symbol_table.lookup(_spill_nm)
+            if _spill_res is not None:
+                _spill_llvm, _ = _spill_res
+                out.append(f"  store {_spill_llvm} {zero_const_for_llvm(_spill_llvm)}, {_spill_llvm}* %{_spill_nm}_addr")
+            owned_vars.discard(_spill_nm)
+            for _sctx in scope_drop_stack:
+                _sctx.get("body_decl_names", set()).discard(_spill_nm)
     def _maybe_flush_deferred(e: Expr, ssa_name: str) -> None:
         if not isinstance(e, Var):
             return
@@ -2189,7 +2264,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     if _bep_df is not None:
                         _bep_df_subj, _bep_df_en, _bep_df_vi, _bep_df_pty, _bep_df_slot = _bep_df
                         out.append(f"  store {_bep_df_pty} null, {_bep_df_pty}* {_bep_df_slot}")
-                    for _ctx in autoregion_stack:
+                    for _ctx in scope_drop_stack:
                         _ctx.get("body_decl_names", set()).discard(vn)
                         _eiro = _ctx.get("extra_ir_owned", [])
                         _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
@@ -2415,6 +2490,9 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             )
             await_ret = new_tmp()
             out.append(f"  {await_ret} = load {ret_llvm}, {ret_llvm}* {res_ptr}")
+            _handle_free_tmp = new_tmp()
+            out.append(f"  {_handle_free_tmp} = bitcast {struct_name}* {handle_tmp} to i8*")
+            out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
             return await_ret
         else:
             out.append("  ; await of non-call expression is not supported here")
@@ -3012,6 +3090,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  store i8 0, i8* {term_ptr}")
             _maybe_flush_deferred(expr.left, lhs)
             _maybe_flush_deferred(expr.right, rhs)
+            _emit_free_if_temp(expr.left, lhs)
+            _emit_free_if_temp(expr.right, rhs)
             return raw
         lt = infer_type(expr.left)
         rt = infer_type(expr.right)
@@ -3136,14 +3216,17 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     and (_ot_ty == "string" or _ot_ty.endswith("*"))
                 ):
                     owned_vars.discard(_ot_arg.name)
-        if autoregion_stack and not _is_enum_variant_name(expr.name):
+        if scope_drop_stack and not _is_enum_variant_name(expr.name):
             for _spill_i, (_spill_arg, _spill_val, _spill_ty) in enumerate(
                 zip(expr.args, arg_vals, arg_types)
             ):
                 if not isinstance(_spill_arg, Call):
                     continue
-                _spill_nown = getattr(
-                    _func_name_map.get(_spill_arg.name), "is_nown", False
+                _spill_nown = (
+                    _spill_arg.name in _NOWN_BUILTIN_FUNCS
+                    or getattr(
+                        _func_name_map.get(_spill_arg.name), "is_nown", False
+                    )
                 )
                 if _spill_nown:
                     continue
@@ -3165,7 +3248,12 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 )
                 symbol_table.declare(_spill_name, _spill_llvm_ty, _spill_name)
                 owned_vars.add(_spill_name)
-                autoregion_stack[-1]["body_decl_names"].add(_spill_name)
+                scope_drop_stack[-1]["body_decl_names"].add(_spill_name)
+                _ar_spilled_ssa_vals.add(_spill_val)
+                _ar_spill_val_to_name[_spill_val] = _spill_name
+                _spill_callee_fn = _func_name_map.get(_spill_arg.name)
+                if _spill_callee_fn is not None and getattr(_spill_callee_fn, "is_extern", False):
+                    _extern_spill_names.add(_spill_name)
         candidates = []
         for ename, variants in enum_variant_map.items():
             if "__mono__" in ename:
@@ -3501,14 +3589,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             )
         if ret_ty == "void":
             if call_target == "free" and len(arg_vals) == 1:
-                if autoregion_stack:
-                    bhumi_report_error(
-                        getattr(expr, "lineno", None),
-                        getattr(expr, "col", None),
-                        "free() is not allowed inside an autoregion, "
-                        "autoregion manages memory automatically. "
-                        "Use crumble() to declare explicit lifetime bounds.",
-                    )
                 ptr_val = arg_vals[0]
                 ptr_ty  = arg_types[0] if arg_types else "void*"
                 ptr_llvm = llvm_ty_of(ptr_ty) if ptr_ty else "i8*"
@@ -3524,15 +3604,15 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     if _fsym is not None:
                         _fty, _fname = _fsym
                         _faddr = f"@{_fname}" if _fname.startswith("@") else f"%{_fname}_addr"
-                        out.append(f"  store {_fty} null, {_fty}* {_faddr}")
+                        out.append(f"  store {_fty} {zero_const_for_llvm(_fty)}, {_fty}* {_faddr}")
                         _bep = binding_enum_payload.get(_fname)
                         if _bep is not None:
                             _bep_enum_ptr, _bep_enum_nm, _bep_vidx, _bep_pty, _bep_slot = _bep
-                            out.append(f"  store {_bep_pty} null, {_bep_pty}* {_bep_slot}")
+                            out.append(f"  store {_bep_pty} {zero_const_for_llvm(_bep_pty)}, {_bep_pty}* {_bep_slot}")
                         if _fvn in crumb_runtime:
                             crumb_runtime[_fvn]["owned"] = False
                         owned_vars.discard(_fvn)
-                        for _ctx in autoregion_stack:
+                        for _ctx in scope_drop_stack:
                             _eirowned = _ctx.get("extra_ir_owned", [])
                             _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
                                 for _ir_nm, _ir_ty, _ir_src in _eirowned
@@ -3544,6 +3624,30 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     if _cancel_cr:
                         _cancel_cr.pop("_deferred_frees", None)
                 return ""
+            if call_target in _FREE_ARG_FUNS and len(arg_vals) >= 1:
+                if expr.args and isinstance(expr.args[0], Var):
+                    _ffvn = expr.args[0].name
+                    _ffsym = symbol_table.lookup(_ffvn)
+                    if _ffsym is not None:
+                        _ffty, _ffname = _ffsym
+                        _ffaddr = _ffname if _ffname.startswith("@") else f"%{_ffname}_addr"
+                        out.append(f"  call void @{call_target}({', '.join(args_ir)})")
+                        out.append(f"  store {_ffty} {zero_const_for_llvm(_ffty)}, {_ffty}* {_ffaddr}")
+                        _bep2 = binding_enum_payload.get(_ffname)
+                        if _bep2 is not None:
+                            _, _, _, _bep2_pty, _bep2_slot = _bep2
+                            out.append(f"  store {_bep2_pty} {zero_const_for_llvm(_bep2_pty)}, {_bep2_pty}* {_bep2_slot}")
+                        if _ffvn in crumb_runtime:
+                            crumb_runtime[_ffvn]["owned"] = False
+                        owned_vars.discard(_ffvn)
+                        for _ctx in scope_drop_stack:
+                            _ctx.get("body_decl_names", set()).discard(_ffvn)
+                            _ctx["extra_ir_owned"] = [
+                                (_ir_nm, _ir_ty, _ir_src)
+                                for _ir_nm, _ir_ty, _ir_src in _ctx.get("extra_ir_owned", [])
+                                if _ir_nm != _ffname
+                            ]
+                        return ""
             out.append(f"  call void @{call_target}({', '.join(args_ir)})")
             for arg_expr, arg_val in zip(expr.args, arg_vals):
                 _maybe_flush_deferred(arg_expr, arg_val)
@@ -3565,6 +3669,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  {tmp2} = call {ret_ty} @{call_target}({', '.join(args_ir)})")
             for arg_expr, arg_val in zip(expr.args, arg_vals):
                 _maybe_flush_deferred(arg_expr, arg_val)
+                if infer_type(arg_expr) == "string":
+                    _emit_free_if_temp(arg_expr, arg_val)
             return tmp2
     if isinstance(expr, FieldAccess):
         if isinstance(expr.base, Var) and expr.base.name in enum_variant_map:
@@ -4133,10 +4239,132 @@ def emit_deep_free(llvm_ty: str, ptr_tmp: str, out: List[str], safe_envelope: bo
             out.append(f"{after_payload_lbl}:")
     env_cast = new_tmp()
     out.append(f"  {env_cast} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-    if safe_envelope and enum_name is None:
+    if enum_name is None:
         out.append(f"  call void @bhumi_safe_c_free(i8* {env_cast})")
     else:
         out.append(f"  call void @bhumi_free(i8* {env_cast})")
+def _last_is_terminator(out: List[str]) -> bool:
+    for line in reversed(out):
+        stripped = line.strip()
+        if not stripped or stripped.endswith(":"):
+            continue
+        return (
+            stripped.startswith("ret ")
+            or stripped == "ret void"
+            or stripped.startswith("br ")
+            or stripped == "unreachable"
+        )
+    return False
+def _emit_scope_drops(ctx: dict, out: List[str]) -> None:
+    import sys as _sys
+    if _last_is_terminator(out):
+        ctx["extra_ir_owned"] = []
+        ctx["match_envelopes"] = []
+        return
+    body_decl_names = ctx.get("body_decl_names", set())
+    pre_owned = ctx.get("pre_owned_snapshot", set())
+    candidates = set(body_decl_names)
+    for _vn in list(owned_vars):
+        if _vn not in pre_owned:
+            candidates.add(_vn)
+    _xir_names = {_n for _n, _t, _s in ctx.get("extra_ir_owned", [])}
+    for nm in candidates:
+        cr = crumb_runtime.get(nm)
+        owned_here = (nm in owned_vars) or (cr is not None and cr.get("owned"))
+        if not owned_here:
+            continue
+        result = symbol_table.lookup(nm)
+        if result is None:
+            continue
+        llvm_ty, llvm_name = result
+        if not llvm_ty.endswith("*"):
+            continue
+        if llvm_name in _xir_names:
+            continue
+        if cr is not None:
+            _rmax_v = cr.get("rmax")
+            _wmax_v = cr.get("wmax")
+            _rc_v = cr.get("rc", 0)
+            _wc_v = cr.get("wc", 0)
+            if _rmax_v is None and _wmax_v is None:
+                print(
+                    f"[Bhumi] Warning: crumble '{nm}' dropped at scope exit; "
+                    f"no read (!r) or write (!w) limit was set, "
+                    f"{_rc_v} read(s) and {_wc_v} write(s) consumed. "
+                    f"Set crumble({nm})!r=<N>!w=<M>; to silence this.",
+                    file=_sys.stderr,
+                )
+            elif _rmax_v is None:
+                print(
+                    f"[Bhumi] Warning: crumble '{nm}' dropped at scope exit; "
+                    f"no read limit (!r) was set, {_rc_v} read(s) consumed. "
+                    f"Set crumble({nm})!r=<count>; to silence this.",
+                    file=_sys.stderr,
+                )
+            elif _wmax_v is None:
+                print(
+                    f"[Bhumi] Warning: crumble '{nm}' dropped at scope exit; "
+                    f"no write limit (!w) was set, {_wc_v} write(s) consumed. "
+                    f"Set crumble({nm})!w=<count>; to silence this.",
+                    file=_sys.stderr,
+                )
+        addr_token = llvm_name if llvm_name.startswith("@") else f"%{llvm_name}_addr"
+        ptr_tmp = new_tmp()
+        out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
+        cast_tmp = new_tmp()
+        out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
+        drop_skip_lbl = new_label("drop_skip")
+        drop_free_lbl = new_label("drop_free")
+        drop_null_tmp = new_tmp()
+        out.append(f"  {drop_null_tmp} = icmp eq i8* {cast_tmp}, null")
+        out.append(f"  br i1 {drop_null_tmp}, label %{drop_skip_lbl}, label %{drop_free_lbl}")
+        out.append(f"{drop_free_lbl}:")
+        emit_deep_free(llvm_ty, ptr_tmp, out, safe_envelope=(nm in _extern_spill_names))
+        out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
+        out.append(f"  br label %{drop_skip_lbl}")
+        out.append(f"{drop_skip_lbl}:")
+        if nm in crumb_runtime:
+            crumb_runtime[nm]["owned"] = False
+        owned_vars.discard(nm)
+    for _ir_nm, _ir_ty, _ir_src in ctx.get("extra_ir_owned", []):
+        _ir_addr = f"%{_ir_nm}_addr"
+        _ir_ptr = new_tmp()
+        _ir_cast = new_tmp()
+        _ir_null = new_tmp()
+        _ir_skip = new_label("xir_skip")
+        _ir_free = new_label("xir_free")
+        out.append(f"  {_ir_ptr} = load {_ir_ty}, {_ir_ty}* {_ir_addr}")
+        out.append(f"  {_ir_cast} = bitcast {_ir_ty} {_ir_ptr} to i8*")
+        out.append(f"  {_ir_null} = icmp eq i8* {_ir_cast}, null")
+        out.append(f"  br i1 {_ir_null}, label %{_ir_skip}, label %{_ir_free}")
+        out.append(f"{_ir_free}:")
+        out.append(f"  call void @bhumi_free(i8* {_ir_cast})")
+        out.append(f"  store {_ir_ty} null, {_ir_ty}* {_ir_addr}")
+        out.append(f"  br label %{_ir_skip}")
+        out.append(f"{_ir_skip}:")
+    ctx["extra_ir_owned"] = []
+    for _me_ty, _me_ir, _me_vn in ctx.get("match_envelopes", []):
+        _me_addr = _me_ir if _me_ir.startswith("@") else f"%{_me_ir}_addr"
+        _me_ptr = new_tmp()
+        _me_cast = new_tmp()
+        _me_null = new_tmp()
+        _me_skip = new_label("me_skip")
+        _me_free = new_label("me_free")
+        out.append(f"  {_me_ptr} = load {_me_ty}, {_me_ty}* {_me_addr}")
+        out.append(f"  {_me_cast} = bitcast {_me_ty} {_me_ptr} to i8*")
+        out.append(f"  {_me_null} = icmp eq i8* {_me_cast}, null")
+        out.append(f"  br i1 {_me_null}, label %{_me_skip}, label %{_me_free}")
+        out.append(f"{_me_free}:")
+        out.append(f"  call void @bhumi_free(i8* {_me_cast})")
+        out.append(f"  store {_me_ty} null, {_me_ty}* {_me_addr}")
+        out.append(f"  br label %{_me_skip}")
+        out.append(f"{_me_skip}:")
+    ctx["match_envelopes"] = []
+def _make_scope_ctx() -> dict:
+    return {
+        "body_decl_names": set(),
+        "pre_owned_snapshot": set(owned_vars),
+    }
 def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
     if isinstance(stmt, VarDecl):
         def _pick_ir_name(name):
@@ -4216,11 +4444,18 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
                 if isinstance(stmt.expr, Call):
                     ret_t = infer_type(stmt.expr)
-                    _nown_callee = getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
+                    _nown_callee = (
+                        stmt.expr.name in _NOWN_BUILTIN_FUNCS
+                        or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
+                    )
                     if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee:
                         owned_vars.add(stmt.name)
                         if stmt.name in crumb_runtime:
                             crumb_runtime[stmt.name]["owned"] = True
+                elif isinstance(stmt.expr, StructInit):
+                    owned_vars.add(stmt.name)
+                    if stmt.name in crumb_runtime:
+                        crumb_runtime[stmt.name]["owned"] = True
                 elif isinstance(stmt.expr, Var):
                     _src_vn = stmt.expr.name
                     if _src_vn in owned_vars:
@@ -4250,7 +4485,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
             if isinstance(stmt.expr, Call):
                 ret_t = infer_type(stmt.expr)
-                _nown_callee2 = getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
+                _nown_callee2 = (
+                    stmt.expr.name in _NOWN_BUILTIN_FUNCS
+                    or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
+                )
                 if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee2:
                     owned_vars.add(stmt.name)
                     if stmt.name in crumb_runtime:
@@ -4313,7 +4551,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             out.append(f"  store {_bcrw_pty} null, {_bcrw_pty}* {_bcrw_slot}")
                     cr["owned"] = False
                     owned_vars.discard(vn)
-                    for _ctx in autoregion_stack:
+                    for _ctx in scope_drop_stack:
                         _ctx.get("body_decl_names", set()).discard(vn)
                         _sym_crw = symbol_table.lookup(vn)
                         if _sym_crw:
@@ -4348,7 +4586,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             out.append(f"  store {_bcrw2_pty} null, {_bcrw2_pty}* {_bcrw2_slot}")
                     cr["owned"] = False
                     owned_vars.discard(vn)
-                    for _ctx in autoregion_stack:
+                    for _ctx in scope_drop_stack:
                         _ctx.get("body_decl_names", set()).discard(vn)
                         _sym_crw2 = symbol_table.lookup(vn)
                         if _sym_crw2:
@@ -4384,13 +4622,73 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     return
             if handled_write_exhaustion_new_alloc:
                 return
+            _reassign_allocs_new = (
+                (
+                    isinstance(stmt.expr, BinOp)
+                    and stmt.expr.op == "+"
+                    and infer_type(stmt.expr) == "string"
+                )
+                or (
+                    isinstance(stmt.expr, Call)
+                    and infer_type(stmt.expr) is not None
+                    and (
+                        infer_type(stmt.expr) == "string"
+                        or infer_type(stmt.expr).endswith("*")
+                    )
+                )
+            )
+            _rhs_takes_lhs = False
+            if isinstance(stmt.expr, Call):
+                _callee_name = stmt.expr.name
+                _callee_def = _func_name_map.get(_callee_name)
+                if _callee_def is None:
+                    _base_nm = _callee_name.split("__mono__")[0]
+                    _callee_def = _func_name_map.get(_base_nm)
+                if _callee_def is not None:
+                    _tp = getattr(_callee_def, "take_params", None) or set()
+                    for _ti in _tp:
+                        if _ti < len(stmt.expr.args):
+                            _ta = stmt.expr.args[_ti]
+                            if isinstance(_ta, Var) and _ta.name == vn:
+                                _rhs_takes_lhs = True
+                                break
+            if (
+                cr is None
+                and vn in owned_vars
+                and llvm_ty.endswith("*")
+                and _reassign_allocs_new
+                and not _rhs_takes_lhs
+            ):
+                _old_ptr = new_tmp()
+                out.append(f"  {_old_ptr} = load {llvm_ty}, {llvm_ty}* {addr_token}")
+                _old_cast = new_tmp()
+                out.append(f"  {_old_cast} = bitcast {llvm_ty} {_old_ptr} to i8*")
+                _old_null_chk = new_tmp()
+                _drop_old_skip = new_label("drop_old_skip")
+                _drop_old_free = new_label("drop_old_free")
+                out.append(f"  {_old_null_chk} = icmp eq i8* {_old_cast}, null")
+                out.append(
+                    f"  br i1 {_old_null_chk}, label %{_drop_old_skip}, label %{_drop_old_free}"
+                )
+                out.append(f"{_drop_old_free}:")
+                out.append(f"  call void @bhumi_safe_c_free(i8* {_old_cast})")
+                out.append(f"  br label %{_drop_old_skip}")
+                out.append(f"{_drop_old_skip}:")
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {addr_token}")
             if isinstance(stmt.expr, Call):
                 ret_t = infer_type(stmt.expr)
-                if ret_t is not None and (ret_t.endswith("*") or ret_t == "string"):
+                _nown_assign = (
+                    stmt.expr.name in _NOWN_BUILTIN_FUNCS
+                    or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
+                )
+                if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_assign:
                     owned_vars.add(vn)
                     if vn in crumb_runtime:
                         crumb_runtime[vn]["owned"] = True
+            elif isinstance(stmt.expr, BinOp) and stmt.expr.op == "+" and infer_type(stmt.expr) == "string":
+                owned_vars.add(vn)
+                if vn in crumb_runtime:
+                    crumb_runtime[vn]["owned"] = True
             elif isinstance(stmt.expr, Var) and llvm_ty.endswith("*"):
                 _src_vn2 = stmt.expr.name
                 if _src_vn2 in owned_vars:
@@ -4461,127 +4759,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             f"  {ptr_tmp} = getelementptr inbounds {llvm_ty}, {llvm_ty}* {arr_addr_token}, i32 0, i32 {idx_cast}"
         )
         out.append(f"  store {base_ty} {val}, {base_ty}* {ptr_tmp}")
-    elif isinstance(stmt, AutoRegion):
-        def _collect_autoregion_decls(body):
-            names = set()
-            def _walk(stmts):
-                if stmts is None:
-                    return
-                for _s in stmts:
-                    if isinstance(_s, VarDecl):
-                        names.add(_s.name)
-                    if isinstance(_s, IfStmt):
-                        _walk(_s.then_body)
-                        if isinstance(_s.else_body, list):
-                            _walk(_s.else_body)
-                        elif isinstance(_s.else_body, IfStmt):
-                            _walk([_s.else_body])
-                    elif isinstance(_s, WhileStmt):
-                        _walk(_s.body)
-                    elif isinstance(_s, Match):
-                        for _case in (_s.cases or []):
-                            if _case.binding is not None:
-                                names.add(_case.binding)
-                            _walk(_case.body)
-                    elif isinstance(_s, AutoRegion):
-                        pass
-            _walk(body)
-            return names
-        body_decl_names = _collect_autoregion_decls(stmt.body)
-        pre_owned_snapshot = set(owned_vars)
-        symbol_table.push()
-        scope_index = len(symbol_table.scopes) - 1
-        ctx = {
-            "scope_index": scope_index,
-            "body_decl_names": body_decl_names,
-            "pre_owned_snapshot": pre_owned_snapshot,
-        }
-        autoregion_stack.append(ctx)
-        for s in stmt.body:
-            gen_stmt(s, out, ret_ty)
-        candidates = set(body_decl_names)
-        for _vn in list(owned_vars):
-            if _vn not in pre_owned_snapshot:
-                candidates.add(_vn)
-        _xir_names = {_n for _n, _t, _s in ctx.get("extra_ir_owned", [])}
-        import sys as _sys
-        for nm in candidates:
-            cr = crumb_runtime.get(nm)
-            owned_here = (nm in owned_vars) or (cr is not None and cr.get("owned"))
-            if not owned_here:
-                continue
-            result = symbol_table.lookup(nm)
-            if result is None:
-                continue
-            llvm_ty, llvm_name = result
-            if not llvm_ty.endswith("*"):
-                continue
-            if llvm_name in _xir_names:
-                continue
-            if cr is not None:
-                _rmax_v = cr.get("rmax")
-                _wmax_v = cr.get("wmax")
-                _rc_v = cr.get("rc", 0)
-                _wc_v = cr.get("wc", 0)
-                if _rmax_v is None and _wmax_v is None:
-                    print(
-                        f"[Bhumi] Warning: crumble '{nm}' freed by autoregion; "
-                        f"no read (!r) or write (!w) limit was set, "
-                        f"{_rc_v} read(s) and {_wc_v} write(s) consumed. "
-                        f"Set crumble({nm})!r=<N>!w=<M>; to silence this.",
-                        file=_sys.stderr,
-                    )
-                elif _rmax_v is None:
-                    print(
-                        f"[Bhumi] Warning: crumble '{nm}' freed by autoregion; "
-                        f"no read limit (!r) was set, {_rc_v} read(s) consumed. "
-                        f"Set crumble({nm})!r=<count>; to silence this.",
-                        file=_sys.stderr,
-                    )
-                elif _wmax_v is None:
-                    print(
-                        f"[Bhumi] Warning: crumble '{nm}' freed by autoregion; "
-                        f"no write limit (!w) was set, {_wc_v} write(s) consumed. "
-                        f"Set crumble({nm})!w=<count>; to silence this.",
-                        file=_sys.stderr,
-                    )
-            addr_token = f"@{llvm_name}" if llvm_name.startswith("@") else f"%{llvm_name}_addr"
-            ptr_tmp = new_tmp()
-            out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
-            cast_tmp = new_tmp()
-            out.append(f"  {cast_tmp} = bitcast {llvm_ty} {ptr_tmp} to i8*")
-            ar_skip_lbl = new_label("ar_skip")
-            ar_free_lbl = new_label("ar_free")
-            ar_null_tmp = new_tmp()
-            out.append(f"  {ar_null_tmp} = icmp eq i8* {cast_tmp}, null")
-            out.append(f"  br i1 {ar_null_tmp}, label %{ar_skip_lbl}, label %{ar_free_lbl}")
-            out.append(f"{ar_free_lbl}:")
-            emit_deep_free(llvm_ty, ptr_tmp, out)
-            out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
-            out.append(f"  br label %{ar_skip_lbl}")
-            out.append(f"{ar_skip_lbl}:")
-            if nm in crumb_runtime:
-                crumb_runtime[nm]["owned"] = False
-            owned_vars.discard(nm)
-        for _ir_nm, _ir_ty, _ir_src in ctx.get("extra_ir_owned", []):
-            _ir_addr = f"%{_ir_nm}_addr"
-            _ir_ptr = new_tmp()
-            _ir_cast = new_tmp()
-            _ir_null = new_tmp()
-            _ir_skip = new_label("xir_skip")
-            _ir_free = new_label("xir_free")
-            out.append(f"  {_ir_ptr} = load {_ir_ty}, {_ir_ty}* {_ir_addr}")
-            out.append(f"  {_ir_cast} = bitcast {_ir_ty} {_ir_ptr} to i8*")
-            out.append(f"  {_ir_null} = icmp eq i8* {_ir_cast}, null")
-            out.append(f"  br i1 {_ir_null}, label %{_ir_skip}, label %{_ir_free}")
-            out.append(f"{_ir_free}:")
-            out.append(f"  call void @bhumi_free(i8* {_ir_cast})")
-            out.append(f"  store {_ir_ty} null, {_ir_ty}* {_ir_addr}")
-            out.append(f"  br label %{_ir_skip}")
-            out.append(f"{_ir_skip}:")
-        autoregion_stack.pop()
-        symbol_table.pop()
-        return
     elif isinstance(stmt, IfStmt):
         cond = gen_expr(stmt.cond, out, expected="bool")
         then_lbl = new_label("then")
@@ -4590,8 +4767,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         out.append(f"  br i1 {cond}, label %{then_lbl}, label %{else_lbl or end_lbl}")
         out.append(f"{then_lbl}:")
         symbol_table.push()
+        _then_ctx = _make_scope_ctx()
+        scope_drop_stack.append(_then_ctx)
         for s in stmt.then_body:
             gen_stmt(s, out, ret_ty)
+        _emit_scope_drops(_then_ctx, out)
+        scope_drop_stack.pop()
         symbol_table.pop()
         last = out[-1].strip() if out else ""
         if not (
@@ -4601,11 +4782,15 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         if stmt.else_body:
             out.append(f"{else_lbl}:")
             symbol_table.push()
+            _else_ctx = _make_scope_ctx()
+            scope_drop_stack.append(_else_ctx)
             if isinstance(stmt.else_body, list):
                 for s in stmt.else_body:
                     gen_stmt(s, out, ret_ty)
             elif isinstance(stmt.else_body, IfStmt):
                 gen_stmt(stmt.else_body, out, ret_ty)
+            _emit_scope_drops(_else_ctx, out)
+            scope_drop_stack.pop()
             symbol_table.pop()
             last = out[-1].strip() if out else ""
             if not (
@@ -4626,8 +4811,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         out.append(f"  br i1 {cond}, label %{body_lbl}, label %{end_lbl}")
         out.append(f"{body_lbl}:")
         symbol_table.push()
+        _while_ctx = _make_scope_ctx()
+        scope_drop_stack.append(_while_ctx)
         for s in stmt.body:
             gen_stmt(s, out, ret_ty)
+        _emit_scope_drops(_while_ctx, out)
+        scope_drop_stack.pop()
         symbol_table.pop()
         last = out[-1].strip() if out else ""
         if not (
@@ -4647,9 +4836,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         if stmt.expr:
             dst_lang = llvm_to_lang(ret_ty)
             val = gen_expr(stmt.expr, out, expected=dst_lang)
-        if autoregion_stack:
+        _returned_var: Optional[str] = None
+        if stmt.expr is not None and isinstance(stmt.expr, Var):
+            _returned_var = stmt.expr.name
+        if scope_drop_stack:
             import sys as _sys
-            for ctx in reversed(autoregion_stack):
+            for ctx in reversed(scope_drop_stack):
                 body_decl_names = ctx.get("body_decl_names", set())
                 pre_owned = ctx.get("pre_owned_snapshot", set())
                 candidates = set(body_decl_names)
@@ -4657,6 +4849,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     if _vn2 not in pre_owned:
                         candidates.add(_vn2)
                 for nm in candidates:
+                    if nm == _returned_var:
+                        continue
                     cr = crumb_runtime.get(nm)
                     owned_here = (nm in owned_vars) or (
                         cr is not None and cr.get("owned")
@@ -4676,7 +4870,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         _wc_v = cr.get("wc", 0)
                         if _rmax_v is None and _wmax_v is None:
                             print(
-                                f"[Bhumi] Warning: crumble '{nm}' freed by autoregion (on return); "
+                                f"[Bhumi] Warning: crumble '{nm}' dropped at scope exit (early return); "
                                 f"no read (!r) or write (!w) limit was set, "
                                 f"{_rc_v} read(s) and {_wc_v} write(s) consumed. "
                                 f"Set crumble({nm})!r=<N>!w=<M>; to silence this.",
@@ -4684,19 +4878,19 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             )
                         elif _rmax_v is None:
                             print(
-                                f"[Bhumi] Warning: crumble '{nm}' freed by autoregion (on return); "
+                                f"[Bhumi] Warning: crumble '{nm}' dropped at scope exit (early return); "
                                 f"no read limit (!r) was set, {_rc_v} read(s) consumed. "
                                 f"Set crumble({nm})!r=<count>; to silence this.",
                                 file=_sys.stderr,
                             )
                         elif _wmax_v is None:
                             print(
-                                f"[Bhumi] Warning: crumble '{nm}' freed by autoregion (on return); "
+                                f"[Bhumi] Warning: crumble '{nm}' dropped at scope exit (early return); "
                                 f"no write limit (!w) was set, {_wc_v} write(s) consumed. "
                                 f"Set crumble({nm})!w=<count>; to silence this.",
                                 file=_sys.stderr,
                             )
-                    addr_token = f"@{llvm_name}" if llvm_name.startswith("@") else f"%{llvm_name}_addr"
+                    addr_token = llvm_name if llvm_name.startswith("@") else f"%{llvm_name}_addr"
                     ptr_tmp = new_tmp()
                     out.append(
                         f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}"
@@ -4713,9 +4907,24 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
                     out.append(f"  br label %{ret_ar_skip}")
                     out.append(f"{ret_ar_skip}:")
-                    if nm in crumb_runtime:
-                        crumb_runtime[nm]["owned"] = False
-                    owned_vars.discard(nm)
+                for _me_ty, _me_ir, _me_vn in ctx.get("match_envelopes", []):
+                    _me_addr = _me_ir if _me_ir.startswith("@") else f"%{_me_ir}_addr"
+                    _me_ptr = new_tmp()
+                    _me_cast = new_tmp()
+                    _me_null = new_tmp()
+                    _me_skip = new_label("ret_me_skip")
+                    _me_free = new_label("ret_me_free")
+                    out.append(f"  {_me_ptr} = load {_me_ty}, {_me_ty}* {_me_addr}")
+                    out.append(f"  {_me_cast} = bitcast {_me_ty} {_me_ptr} to i8*")
+                    out.append(f"  {_me_null} = icmp eq i8* {_me_cast}, null")
+                    out.append(f"  br i1 {_me_null}, label %{_me_skip}, label %{_me_free}")
+                    out.append(f"{_me_free}:")
+                    out.append(f"  call void @bhumi_free(i8* {_me_cast})")
+                    out.append(f"  store {_me_ty} null, {_me_ty}* {_me_addr}")
+                    out.append(f"  br label %{_me_skip}")
+                    out.append(f"{_me_skip}:")
+                ctx["match_envelopes"] = []
+                ctx["extra_ir_owned"] = []
         if val:
             src_lang = infer_type(stmt.expr)
             dst_lang = llvm_to_lang(ret_ty)
@@ -4742,14 +4951,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
     elif isinstance(stmt, ExprStmt):
         gen_expr(stmt.expr, out)
     elif isinstance(stmt, ForgetStmt):
-        if autoregion_stack:
-            bhumi_report_error(
-                getattr(stmt, "lineno", None),
-                getattr(stmt, "col", None),
-                f"forget({stmt.varname}) is not allowed inside an autoregion, "
-                "autoregion manages memory automatically. "
-                "Use crumble() to declare explicit lifetime bounds.",
-            )
         llvm_ty, llvm_name = symbol_table.lookup(stmt.varname)
         if not llvm_ty.endswith("*"):
             bhumi_report_error(
@@ -4757,7 +4958,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 getattr(stmt, "col", None),
                 f"Cannot forget non-pointer type '{llvm_ty}'",
             )
-        addr_token = f"@{llvm_name}" if llvm_name.startswith("@") else f"%{llvm_name}_addr"
+        addr_token = llvm_name if llvm_name.startswith("@") else f"%{llvm_name}_addr"
         ptr_tmp = new_tmp()
         out.append(f"  {ptr_tmp} = load {llvm_ty}, {llvm_ty}* {addr_token}")
         cast_tmp = new_tmp()
@@ -4782,7 +4983,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         if stmt.varname in crumb_runtime:
             crumb_runtime[stmt.varname]["owned"] = False
         owned_vars.discard(stmt.varname)
-        for _ctx in autoregion_stack:
+        for _ctx in scope_drop_stack:
             _eirowned = _ctx.get("extra_ir_owned", [])
             _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
                 for _ir_nm, _ir_ty, _ir_src in _eirowned
@@ -4881,8 +5082,14 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         f"Unknown variant {case.variant} for enum {enum_name}",
                     )
                 out.append(f"{lbl}:")
+                symbol_table.push()
+                _sw_arm_ctx = _make_scope_ctx()
+                scope_drop_stack.append(_sw_arm_ctx)
                 for s in case.body:
                     gen_stmt(s, out, ret_ty)
+                _emit_scope_drops(_sw_arm_ctx, out)
+                scope_drop_stack.pop()
+                symbol_table.pop()
                 last = out[-1].strip() if out else ""
                 if not (
                     last.startswith("ret")
@@ -4929,8 +5136,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     )
                     if _nested_payload_is_bhumi_obj and outer_enum_ptr_owned:
                         owned_vars.add(case.binding)
-                        if autoregion_stack:
-                            autoregion_stack[-1].setdefault(
+                        if scope_drop_stack:
+                            scope_drop_stack[-1].setdefault(
                                 "extra_ir_owned", []
                             ).append((binding_ir, llvm_payload_ty, case.binding))
                 for s in case.body:
@@ -5026,6 +5233,9 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     f"Unknown variant {case.variant} for enum {enum_name}",
                 )
             out.append(f"{lbl}:")
+            symbol_table.push()
+            _arm_ctx = _make_scope_ctx()
+            scope_drop_stack.append(_arm_ctx)
             variant_info = next(
                 (v for v in enum_variant_map[enum_name] if v[0] == case.variant), None
             )
@@ -5092,6 +5302,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     out.append(
                         f"  store {llvm_payload_ty} {loaded_payload}, {llvm_payload_ty}* %{binding_ir}_addr"
                     )
+                    if llvm_payload_ty.endswith("*"):
+                        out.append(
+                            f"  store {llvm_payload_ty} null, {llvm_payload_ty}* {payload_ptr_cast}"
+                        )
                     symbol_table.declare(case.binding, llvm_payload_ty, binding_ir)
                     if llvm_payload_ty.endswith("*"):
                         _v_idx = next(
@@ -5115,8 +5329,14 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     )
                     if _payload_is_bhumi_obj and _match_subj_owned:
                         owned_vars.add(case.binding)
-                        if autoregion_stack:
-                            autoregion_stack[-1].setdefault(
+                        if scope_drop_stack:
+                            scope_drop_stack[-1].setdefault(
+                                "extra_ir_owned", []
+                            ).append((binding_ir, llvm_payload_ty, case.binding))
+                    elif llvm_payload_ty == "i8*" and _match_subj_owned:
+                        owned_vars.add(case.binding)
+                        if scope_drop_stack:
+                            scope_drop_stack[-1].setdefault(
                                 "extra_ir_owned", []
                             ).append((binding_ir, llvm_payload_ty, case.binding))
             if case.nested_pattern is not None:
@@ -5127,9 +5347,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     end_lbl, out, ret_ty,
                     outer_enum_ptr_owned=_subj_owned_nested
                 )
+                _emit_scope_drops(_arm_ctx, out)
             else:
                 for s in case.body:
                     gen_stmt(s, out, ret_ty)
+                _emit_scope_drops(_arm_ctx, out)
                 last = out[-1].strip() if out else ""
                 if not (
                     last.startswith("ret")
@@ -5137,7 +5359,39 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     or last.startswith("br ")
                 ):
                     out.append(f"  br label %{end_lbl}")
+            scope_drop_stack.pop()
+            symbol_table.pop()
         out.append(f"{end_lbl}:")
+        if isinstance(stmt.expr, Var) and stmt.expr.name in owned_vars:
+            _subj_sym = symbol_table.lookup(stmt.expr.name)
+            if _subj_sym is not None:
+                _subj_llvm_ty, _subj_ir = _subj_sym
+                if _subj_llvm_ty.endswith("*") and (
+                    _subj_llvm_ty.startswith("%enum.")
+                    or (_subj_llvm_ty.startswith("%struct.")
+                        and _subj_llvm_ty[len("%struct."):-1] in enum_variant_map)
+                ):
+                    if scope_drop_stack:
+                        scope_drop_stack[-1].setdefault("match_envelopes", []).append(
+                            (_subj_llvm_ty, _subj_ir, stmt.expr.name)
+                        )
+                    else:
+                        _env_ptr = new_tmp()
+                        _env_addr = f"@{_subj_ir}" if _subj_ir.startswith("@") else f"%{_subj_ir}_addr"
+                        out.append(f"  {_env_ptr} = load {_subj_llvm_ty}, {_subj_llvm_ty}* {_env_addr}")
+                        _env_null_tmp = new_tmp()
+                        _env_cast = new_tmp()
+                        out.append(f"  {_env_cast} = bitcast {_subj_llvm_ty} {_env_ptr} to i8*")
+                        _env_done_lbl = new_label("match_env_done")
+                        _env_free_lbl = new_label("match_env_free")
+                        out.append(f"  {_env_null_tmp} = icmp eq i8* {_env_cast}, null")
+                        out.append(f"  br i1 {_env_null_tmp}, label %{_env_done_lbl}, label %{_env_free_lbl}")
+                        out.append(f"{_env_free_lbl}:")
+                        out.append(f"  call void @bhumi_free(i8* {_env_cast})")
+                        out.append(f"  store {_subj_llvm_ty} null, {_subj_llvm_ty}* {_env_addr}")
+                        out.append(f"  br label %{_env_done_lbl}")
+                        out.append(f"{_env_done_lbl}:")
+                    owned_vars.discard(stmt.expr.name)
 def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
     orig = globals().get("original_enum_defs", {})
     base = typ.rstrip("*")
@@ -5160,14 +5414,35 @@ def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
             f"Did you mean '{base}<{needed}>'?"
         )
 def gen_func(fn: Func) -> List[str]:
+    _saved_outer_alloca_buf = list(_entry_alloca_buf)
+    _saved_outer_scope_drop = list(scope_drop_stack)
+    _saved_outer_crumb = dict(crumb_runtime)
+    _saved_outer_owned = set(owned_vars)
+    _saved_outer_spilled_ssa = set(_ar_spilled_ssa_vals)
+    _saved_outer_spill_name = dict(_ar_spill_val_to_name)
+    _saved_outer_extern_spills = set(_extern_spill_names)
     crumb_runtime.clear()
     owned_vars.clear()
     binding_enum_payload.clear()
     binding_source_name.clear()
     _entry_alloca_buf.clear()
+    _extern_spill_names.clear()
+    _ar_spilled_ssa_vals.clear()
+    _ar_spill_val_to_name.clear()
+    scope_drop_stack.clear()
+    def _restore_outer():
+        _entry_alloca_buf.extend(_saved_outer_alloca_buf)
+        scope_drop_stack.extend(_saved_outer_scope_drop)
+        crumb_runtime.update(_saved_outer_crumb)
+        owned_vars.update(_saved_outer_owned)
+        _ar_spilled_ssa_vals.update(_saved_outer_spilled_ssa)
+        _ar_spill_val_to_name.update(_saved_outer_spill_name)
+        _extern_spill_names.update(_saved_outer_extern_spills)
     if fn.type_params:
+        _restore_outer()
         return []
     if fn.ret_type == "#":
+        _restore_outer()
         return []
     if fn.is_extern and fn.ret_type == "#":
         bhumi_report_error(
@@ -5179,6 +5454,7 @@ def gen_func(fn: Func) -> List[str]:
         param_sig = ", ".join(f"{llvm_ty_of(t)} %{n}" for t, n in fn.params)
         ret_ty = llvm_ty_of(fn.ret_type)
         generated_mono[fn.name] = True
+        _restore_outer()
         return [f"declare {ret_ty} @{fn.name}({param_sig})"]
     if fn.is_async:
         if fn.body is None or len(fn.body) == 0:
@@ -5201,6 +5477,7 @@ def gen_func(fn: Func) -> List[str]:
         func_table[f"{fn.name}_init"] = f"{struct_ty}*"
         func_table[f"{fn.name}_resume"] = "i1"
         symbol_table.pop()
+        _restore_outer()
         return lines
     symbol_table.push()
     generated_mono[fn.name] = True
@@ -5301,6 +5578,8 @@ def gen_func(fn: Func) -> List[str]:
                 symbol_table.declare(stmt.name, llvm_ty, stmt.name)
     entry_insert_pos = len(out)
     has_return = False
+    _fn_scope_ctx = _make_scope_ctx()
+    scope_drop_stack.append(_fn_scope_ctx)
     for stmt in fn.body or []:
         if isinstance(stmt, ReturnStmt):
             gen_stmt(stmt, out, ret_ty)
@@ -5308,10 +5587,21 @@ def gen_func(fn: Func) -> List[str]:
             break
         else:
             gen_stmt(stmt, out, ret_ty)
+    if not has_return:
+        _emit_scope_drops(_fn_scope_ctx, out)
+    if scope_drop_stack:
+        scope_drop_stack.pop()
     if _entry_alloca_buf:
         for i, line in enumerate(_entry_alloca_buf):
             out.insert(entry_insert_pos + i, line)
         _entry_alloca_buf.clear()
+    scope_drop_stack.extend(_saved_outer_scope_drop)
+    crumb_runtime.update(_saved_outer_crumb)
+    owned_vars.update(_saved_outer_owned)
+    _entry_alloca_buf.extend(_saved_outer_alloca_buf)
+    _ar_spilled_ssa_vals.update(_saved_outer_spilled_ssa)
+    _ar_spill_val_to_name.update(_saved_outer_spill_name)
+    _extern_spill_names.update(_saved_outer_extern_spills)
     if not has_return:
         if ret_ty == "void":
             out.append("  ret void")
@@ -5643,12 +5933,6 @@ def annotate_types(prog: Program) -> None:
                     _ann_stmt(s, ret_type)
                 ann_env.pop()
             return
-        if isinstance(stmt, AutoRegion):
-            ann_env.push()
-            for s in (stmt.body or []):
-                _ann_stmt(s, ret_type)
-            ann_env.pop()
-            return
         if isinstance(stmt, (ContinueStmt, BreakStmt, CrumbleStmt, ForgetStmt)):
             return
         for attr in getattr(stmt, "__dict__", {}):
@@ -5728,11 +6012,9 @@ def compile_program(prog: Program) -> str:
 @.null_msg = private unnamed_addr constant [45 x i8] c"[BhumiCompiler-RT-CHCK]: Null pointer deref.\\00"
 @.heap_msg = private unnamed_addr constant [67 x i8] c"[BhumiCompiler-RT-HEAP]: Invalid free or heap corruption detected.\\00"
 @.segv_msg = private unnamed_addr constant [71 x i8] c"[BhumiCompiler-RT-CHCK]: Segmentation fault / memory violation caught.\\00"
-@.ffi_free_msg = private unnamed_addr constant [78 x i8] c"[BhumiCompiler-RT-HEAP]: free() on bhumi-owned pointer; use forget() instead.\\00"
-@.forget_c_msg = private unnamed_addr constant [83 x i8] c"[BhumiCompiler-RT-HEAP]: forget() on non-bhumi pointer; use free() for FFI allocs.\\00"
+@.ffi_free_msg = private unnamed_addr constant [55 x i8] c"[BhumiCompiler-RT-HEAP]: free() on bhumi-owned pointer\\00"
+@.forget_c_msg = private unnamed_addr constant [55 x i8] c"[BhumiCompiler-RT-HEAP]: forget() on non-bhumi pointer\\00"
 @.alloc_magic = global i64 0
-; Signal handler: catches SIGSEGV (11) and SIGABRT (6), prints a message and exits
-; cleanly so the runtime message is always visible.
 define void @bhumi_signal_handler(i32 %sig) {
 entry:
   %tmp = call i32 @puts(i8* getelementptr inbounds ([71 x i8], [71 x i8]* @.segv_msg, i32 0, i32 0))
@@ -5760,20 +6042,14 @@ entry:
   %r64 = zext i32 %r to i64
   %xor_magic = xor i64 %r64, 16045690984833335023
   store i64 %xor_magic, i64* @.alloc_magic
-  ; Install SIGSEGV (11) and SIGABRT (6) handlers so any memory violation
-  ; produces a clean Bhumi runtime message instead of a raw OS crash.
   %handler = bitcast void (i32)* @bhumi_signal_handler to i8*
   %_prev_segv = call i8* @signal(i32 11, i8* %handler)
   %_prev_abrt = call i8* @signal(i32 6, i8* %handler)
   ret void
 }
-; Side table: open-addressing hash set of bhumi-owned user pointers.
-; Heap-allocated, power-of-2 capacity, auto-resizes at 75% load.
-; null = empty slot. Linear probing.
 @.bhumi_tbl_ptr = global i8** null
 @.bhumi_tbl_cap = global i64 0
 @.bhumi_tbl_cnt = global i64 0
-; Raw insert into an arbitrary slot array, no resize, no count bump. Used by rehash.
 define void @bhumi_tbl_raw_insert(i8** %slots, i64 %cap, i8* %ptr) {
 entry:
   %mask = sub i64 %cap, 1
@@ -5794,7 +6070,6 @@ do_store:
   store i8* %ptr, i8** %ep
   ret void
 }
-; Grow table to newcap (must be power of 2), rehash all live entries, free old array.
 define void @bhumi_tbl_grow(i64 %newcap) {
 entry:
   %nbytes = mul i64 %newcap, 8
@@ -5835,7 +6110,6 @@ rehash_done:
   store i64 %newcap,     i64*  @.bhumi_tbl_cap
   ret void
 }
-; Lazy init to 64 slots on first use.
 define void @bhumi_tbl_ensure_init() {
 entry:
   %cap = load i64, i64* @.bhumi_tbl_cap
@@ -5847,7 +6121,6 @@ do_init:
 done:
   ret void
 }
-; Insert a pointer into the side table (called by bhumi_malloc).
 define void @bhumi_tbl_insert(i8* %ptr) {
 entry:
   call void @bhumi_tbl_ensure_init()
@@ -5870,8 +6143,6 @@ do_insert:
   store i64 %cnt3, i64* @.bhumi_tbl_cnt
   ret void
 }
-; Remove a pointer from the side table (called by bhumi_free).
-; Uses backward-shift deletion to keep probing chains intact.
 define void @bhumi_tbl_remove(i8* %ptr) {
 entry:
   %cap = load i64, i64* @.bhumi_tbl_cap
@@ -5884,7 +6155,6 @@ do_remove:
   %hash = and i64 %pint, %mask
   br label %find_loop
 find_loop:
-  ; feed %fwrap (masked) back, not raw %fnext
   %fi = phi i64 [ %hash, %do_remove ], [ %fwrap, %find_cont ]
   %fep = getelementptr i8*, i8** %slots, i64 %fi
   %fcur = load i8*, i8** %fep
@@ -5903,7 +6173,6 @@ found:
   %shift_wrap = and i64 %shift_start, %mask
   br label %shift_loop
 shift_loop:
-  ; predecessor is %shift_cont (where %snext_wrap is defined), not %do_shift
   %si = phi i64 [ %shift_wrap, %found ], [ %snext_wrap, %shift_cont ]
   %sep = getelementptr i8*, i8** %slots, i64 %si
   %scur = load i8*, i8** %sep
@@ -5934,7 +6203,6 @@ shift_done:
 not_found:
   ret void
 }
-; Check if a pointer is in the side table (1 = bhumi-owned, 0 = not).
 define i1 @bhumi_tbl_contains(i8* %ptr) {
 entry:
   %is_null = icmp eq i8* %ptr, null
@@ -5995,8 +6263,6 @@ ok_alloc:
   %footer_ptr = getelementptr i8, i8* %user_ptr, i64 %usize
   %footer_ptr_i64 = bitcast i8* %footer_ptr to i64*
   store i64 %global_magic, i64* %footer_ptr_i64
-  ; Register in side table so bhumi_alloc_size/bhumi_free never speculatively
-  ; read ptr-16 on non-bhumi pointers.
   call void @bhumi_tbl_insert(i8* %user_ptr)
   ret i8* %user_ptr
 }
@@ -6005,7 +6271,6 @@ entry:
   %is_null = icmp eq i8* %userptr, null
   br i1 %is_null, label %ret_void, label %check_tbl
 check_tbl:
-  ; Side-table lookup, safe, no speculative ptr-16 read on C pointers.
   %is_bhumi = call i1 @bhumi_tbl_contains(i8* %userptr)
   br i1 %is_bhumi, label %free_ok, label %free_fail
 free_fail:
@@ -6018,9 +6283,6 @@ free_ok:
   %hdr_i64 = bitcast i8* %raw_hdr to i64*
   %size_slot = getelementptr i8, i8* %raw_hdr, i64 8
   %size_i64 = bitcast i8* %size_slot to i64*
-  ; Poison only the header fields (magic + size), both live inside our own
-  ; allocation.  Do NOT touch the footer: it sits at userptr+sz which overlaps
-  ; the next glibc chunk's prev_size field and would corrupt the heap.
   store i64 0, i64* %hdr_i64
   store i64 0, i64* %size_i64
   call void @free(i8* %raw_hdr)
@@ -6045,10 +6307,6 @@ is_c_alloc:
 done:
   ret void
 }
-; bhumi_safe_c_free: like bhumi_c_free but skips non-heap pointers (e.g. string
-; literals in .rodata).  Checks the bhumi side-table first (bhumi pointers are
-; offset +16 from the raw malloc base, so malloc_usable_size returns 0 for them
-; and must NOT be used as the heap guard for bhumi-owned memory).
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
@@ -6069,9 +6327,6 @@ do_c_free:
 done:
   ret void
 }
-; bhumi_ffi_free: strict C-only free for FFI-allocated memory.
-; Aborts with an error if the pointer is bhumi-owned, those must be freed
-; with forget() so bhumi can update its side-table and prevent UAF/DF.
 define void @bhumi_ffi_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
@@ -6268,6 +6523,18 @@ do_free:
   br label %done
 done:
   ret void
+}
+define void @bhumi_tbl_insert(i8* %ptr) {
+entry:
+  ret void
+}
+define void @bhumi_tbl_remove(i8* %ptr) {
+entry:
+  ret void
+}
+define i1 @bhumi_tbl_contains(i8* %ptr) {
+entry:
+  ret i1 0
 }
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
@@ -7889,12 +8156,6 @@ def check_types(prog: Program):
         if isinstance(stmt, ExprStmt):
             check_expr(stmt.expr)
             return
-        if isinstance(stmt, AutoRegion):
-            env.push()
-            for s in stmt.body:
-                check_stmt(s, expected_ret, func)
-            env.pop()
-            return
         if isinstance(stmt, Match):
             enum_typ = check_expr(stmt.expr)
             enum_base = enum_typ.rstrip("*")
@@ -8046,6 +8307,11 @@ def check_types(prog: Program):
         env.push()
         for (param_typ, param_name) in func.params:
             env.declare(param_name, param_typ)
+        _pre_func_crumb_keys = set(crumb_map.keys())
+        alias_creations.clear()
+        alias_targets.clear()
+        alias_set.clear()
+        crumb_order.clear()
         reachable = True
         for i, s in enumerate((func.body or [])):
             if not reachable:
@@ -8070,75 +8336,78 @@ def check_types(prog: Program):
             ):
                 reachable = False
         env.pop()
-    over_errors = []
-    for (alias_name, original_name, lineno, col, idx) in alias_creations:
-        if alias_name is None:
-            bhumi_report_error(
-                lineno,
-                col,
-                f"Internal alias error: alias name is None (original='{original_name}')",
-            )
-        if alias_name not in crumb_map:
-            bhumi_report_error(
-                lineno,
-                col,
-                f"Alias '{alias_name}' must have a corresponding crumble({alias_name}) statement to declare mutability (e.g. crumble({alias_name})!r=<read_count>!w=<write_count>;)",
-            )
-    for original, aliases in alias_targets.items():
-        mutable_aliases = []
-        for a in aliases:
-            if a not in crumb_map:
-                continue
-            rmax, wmax, rc, wc = crumb_map[a]
-            allows_write = (wmax is None) or (wmax > 0)
-            if allows_write:
-                mutable_aliases.append(a)
-        if len(mutable_aliases) <= 1:
-            continue
-        def _score(alias_name):
-            return (
-                crumb_order.get(alias_name, -1),
-                next(
-                    (idx for (an, _, _, _, idx) in alias_creations if an == alias_name),
-                    -1,
-                ),
-            )
-        winner = max(mutable_aliases, key=_score)
-        for other in mutable_aliases:
-            if other == winner:
-                continue
-            rmax, wmax, rc, wc = crumb_map[other]
-            if (wmax is None) or (wmax > 0):
-                crumb_map[other] = (rmax, 0, rc, wc)
-                print(
-                    f"[Crawl-Checker]-[WARN]: revoked write permission on alias '{other}' because alias '{winner}' has more recent write permissions for original '{original}'."
+        _func_crumb_keys = set(crumb_map.keys()) - _pre_func_crumb_keys
+        for (alias_name, original_name, lineno, col, idx) in alias_creations:
+            if alias_name is None:
+                bhumi_report_error(
+                    lineno,
+                    col,
+                    f"Internal alias error: alias name is None (original='{original_name}')",
                 )
-    for name, (rmax, wmax, rc, wc) in list(crumb_map.items()):
-        over_r = (rc - rmax) if (rmax is not None and rc > rmax) else 0
-        over_w = (wc - wmax) if (wmax is not None and wc > wmax) else 0
-        if over_r or over_w:
-            over_errors.append((name, rmax, wmax, rc, wc, over_r, over_w))
-    if over_errors:
-        msgs = []
-        for (name, rmax, wmax, rc, wc, orr, ow) in over_errors:
-            msgs.append(
-                f"'Var \"{name}\"': reads {rc} (limit {rmax}, over {orr}), writes {wc} (limit {wmax}, over {ow})"
+            if alias_name not in crumb_map:
+                bhumi_report_error(
+                    lineno,
+                    col,
+                    f"Alias '{alias_name}' must have a corresponding crumble({alias_name}) statement to declare mutability (e.g. crumble({alias_name})!r=<read_count>!w=<write_count>;)",
+                )
+        for original, aliases in alias_targets.items():
+            mutable_aliases = []
+            for a in aliases:
+                if a not in crumb_map:
+                    continue
+                rmax, wmax, rc, wc = crumb_map[a]
+                allows_write = (wmax is None) or (wmax > 0)
+                if allows_write:
+                    mutable_aliases.append(a)
+            if len(mutable_aliases) <= 1:
+                continue
+            def _score(alias_name):
+                return (
+                    crumb_order.get(alias_name, -1),
+                    next(
+                        (idx for (an, _, _, _, idx) in alias_creations if an == alias_name),
+                        -1,
+                    ),
+                )
+            winner = max(mutable_aliases, key=_score)
+            for other in mutable_aliases:
+                if other == winner:
+                    continue
+                rmax, wmax, rc, wc = crumb_map[other]
+                if (wmax is None) or (wmax > 0):
+                    crumb_map[other] = (rmax, 0, rc, wc)
+                    print(
+                        f"[Crawl-Checker]-[WARN]: revoked write permission on alias '{other}' because alias '{winner}' has more recent write permissions for original '{original}'."
+                    )
+        over_errors = []
+        for name in _func_crumb_keys:
+            rmax, wmax, rc, wc = crumb_map[name]
+            over_r = (rc - rmax) if (rmax is not None and rc > rmax) else 0
+            over_w = (wc - wmax) if (wmax is not None and wc > wmax) else 0
+            if over_r or over_w:
+                over_errors.append((name, rmax, wmax, rc, wc, over_r, over_w))
+        if over_errors:
+            msgs = []
+            for (name, rmax, wmax, rc, wc, orr, ow) in over_errors:
+                msgs.append(
+                    f"'Var \"{name}\"': reads {rc} (limit {rmax}, over {orr}), writes {wc} (limit {wmax}, over {ow})"
+                )
+            bhumi_report_error(
+                None,
+                None,
+                "[Crawl-Checker]-[ERR]: Crumble limits exceeded: " + "; ".join(msgs),
             )
-        bhumi_report_error(
-            None,
-            None,
-            "[Crawl-Checker]-[ERR]: Crumble limits exceeded: " + "; ".join(msgs),
-        )
-    for name, (rmax, wmax, rc, wc) in list(crumb_map.items()):
-        if rmax is not None and rc < rmax:
-            print(
-                f"[Crawl-Checker]-[WARN]: unused read crumbs on '{name}': {rmax - rc} left. [This is not an error but a security warning!]"
-            )
-        if wmax is not None and wc < wmax:
-            print(
-                f"[Crawl-Checker]-[WARN]: unused write crumbs on '{name}': {wmax - wc} left. [This is not an error but a security warning!]"
-            )
-        crumb_map.clear()
+        for name in _func_crumb_keys:
+            rmax, wmax, rc, wc = crumb_map[name]
+            if rmax is not None and rc < rmax:
+                print(
+                    f"[Crawl-Checker]-[WARN]: unused read crumbs on '{name}': {rmax - rc} left. [This is not an error but a security warning!]"
+                )
+            if wmax is not None and wc < wmax:
+                print(
+                    f"[Crawl-Checker]-[WARN]: unused write crumbs on '{name}': {wmax - wc} left. [This is not an error but a security warning!]"
+                )
+            del crumb_map[name]
 class AsyncStateMachine:
     def __init__(self, func: Func, codegen):
         self.func = func
