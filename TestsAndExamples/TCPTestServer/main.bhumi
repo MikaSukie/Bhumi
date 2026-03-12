@@ -203,7 +203,7 @@ pub fn run_server() <void> {
             continue;
         }
 
-        string body = try_read_file(filename);
+        string body = read_file(filename);
 
         int ret = send_response(client, body);
         if (ret != 0) {
