@@ -1208,6 +1208,21 @@ class Parser:
             self.bump()
             return True
         return False
+    def _lookahead_is_func(self) -> bool:
+        _FUNC_MODS = {"NOWN", "PUB", "PRIV", "PROT", "ASYNC", "VASYNC", "EXTERN"}
+        i = self.pos + 1
+        while i < len(self.tokens):
+            tk = self.tokens[i].kind
+            if tk == "FN":
+                return True
+            if tk in _FUNC_MODS:
+                i += 1
+                continue
+            if tk != "FN" and tk.lower() in KEYWORDS:
+                i += 1
+                continue
+            return False
+        return False
     def parse(self) -> Program:
         funcs = []
         imports = []
@@ -1267,7 +1282,7 @@ class Parser:
                             f"Expected ',' or ';' in import list, got {self.peek().kind}",
                         )
             elif (
-                self.peek().kind == "EXTERN" and self.tokens[self.pos + 1].kind == "FN"
+                self.peek().kind == "EXTERN" and self._lookahead_is_func()
             ):
                 funcs.append(self.parse_func())
             elif self.peek().kind in {"EXTERN", "NOMD", "PIN"}:
@@ -2057,8 +2072,8 @@ class Parser:
                 expr = self.parse_expr()
                 self.expect("RPAREN")
                 return expr
-            if t.kind == "IDENT" and t.value == "BHC.get_args":
-                return Call("BHC.get_args", [])
+            if t.kind == "IDENT" and t.value == "BhumiCompiler.get_args":
+                return Call("BhumiCompiler.get_args", [])
             if t.kind == "IDENT":
                 ident_name = t.value
                 if self.peek().kind == "ARROW":
@@ -2817,7 +2832,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         tmp = new_tmp()
         out.append(f"  {tmp} = bitcast i8* null to i8*")
         return tmp
-    if isinstance(expr, Call) and expr.name == "BHC.get_args":
+    if isinstance(expr, Call) and expr.name == "BhumiCompiler.get_args":
         tmp = new_tmp()
         out.append(f"  {tmp} = load i8**, i8*** @__argv_ptr")
         return tmp
@@ -3865,14 +3880,14 @@ def infer_type(expr: Expr) -> str:
             bhumi_report_error(
                 getattr(expr.ptr, "lineno", None),
                 getattr(expr.ptr, "col", None),
-                "[BHC-ERR]: dereference of literal null pointer",
+                "[BhumiCompiler-ERR]: dereference of literal null pointer",
             )
         ptr_type = infer_type(expr.ptr)
         if ptr_type == "null" or ptr_type == "void*":
             bhumi_report_error(
                 getattr(expr.ptr, "lineno", None),
                 getattr(expr.ptr, "col", None),
-                "[BHC-ERR]: dereference of an expression known to be null",
+                "[BhumiCompiler-ERR]: dereference of an expression known to be null",
             )
         if not ptr_type.endswith("*"):
             bhumi_report_error(
@@ -6773,6 +6788,7 @@ def check_types(prog: Program):
     alias_targets: Dict[str, set] = {}
     alias_set: set = set()
     alias_creation_counter = 0
+    nown_vars: set = set()
     crumb_order: Dict[str, int] = {}
     def _inc_read(name: str, node_desc: Optional[str] = None):
         if name not in crumb_map:
@@ -6984,7 +7000,7 @@ def check_types(prog: Program):
                     bhumi_report_error(
                         getattr(expr.right, "lineno", None),
                         getattr(expr.right, "col", None),
-                        f"[BHC-ERR]: division or modulo by constant 0 ('{expr.op}')",
+                        f"[BhumiCompiler-ERR]: division or modulo by constant 0 ('{expr.op}')",
                     )
             if expr.op == "+" and left == "string" and right == "string":
                 return "string"
@@ -7079,7 +7095,14 @@ def check_types(prog: Program):
                         bhumi_report_error(
                             getattr(a0, "lineno", None),
                             getattr(a0, "col", None),
-                            f"[BHC-ERR]: double free detected on variable '{vname}'",
+                            f"[BhumiCompiler-ERR]: double free detected on variable '{vname}'",
+                        )
+                    if not is_extern_global and vname not in nown_vars:
+                        bhumi_report_error(
+                            getattr(a0, "lineno", None),
+                            getattr(a0, "col", None),
+                            f"'free({vname})' is not allowed: \n'{vname}' does not trace back to a 'nown' (non owning) function.\n"
+                            f"Only values returned by 'nown' functions may be manually released with free() or forget().",
                         )
                     env.declare(vname, "undefined")
                 return "void"
@@ -7689,6 +7712,7 @@ def check_types(prog: Program):
         )
     def check_stmt(stmt: Stmt, expected_ret: str, func: Optional[Func] = None):
         nonlocal alias_creation_counter
+        nonlocal nown_vars
         if isinstance(stmt, VarDecl):
             if env.lookup(stmt.name):
                 bhumi_report_error(
@@ -7713,6 +7737,16 @@ def check_types(prog: Program):
                     f"Unknown type '{raw_typ}'",
                 )
             env.declare(stmt.name, raw_typ)
+            if stmt.expr is not None:
+                _is_nown_init = False
+                if isinstance(stmt.expr, Call):
+                    _callee = _func_name_map.get(stmt.expr.name)
+                    if _callee is not None and getattr(_callee, "is_nown", False):
+                        _is_nown_init = True
+                elif isinstance(stmt.expr, Var) and stmt.expr.name in nown_vars:
+                    _is_nown_init = True
+                if _is_nown_init:
+                    nown_vars.add(stmt.name)
             if stmt.expr:
                 expr_type = check_expr(stmt.expr, expected=raw_typ)
                 _inc_write(
@@ -7934,6 +7968,13 @@ def check_types(prog: Program):
             _inc_write(
                 stmt.name, node_desc=f"AssignWrite@{getattr(stmt, 'lineno', '?')}"
             )
+            if isinstance(stmt.name, str):
+                if isinstance(stmt.expr, Call):
+                    _a_callee = _func_name_map.get(stmt.expr.name)
+                    if _a_callee is not None and getattr(_a_callee, "is_nown", False):
+                        nown_vars.add(stmt.name)
+                elif isinstance(stmt.expr, Var) and stmt.expr.name in nown_vars:
+                    nown_vars.add(stmt.name)
             if isinstance(stmt.expr, Var) and var_type.endswith("*"):
                 src_name = stmt.expr.name
                 if src_name != stmt.name:
@@ -7964,6 +8005,13 @@ def check_types(prog: Program):
                     getattr(stmt, "lineno", None),
                     getattr(stmt, "col", None),
                     f"Compile-time error: double free / forget on variable '{stmt.varname}'",
+                )
+            if stmt.varname not in nown_vars:
+                bhumi_report_error(
+                    getattr(stmt, "lineno", None),
+                    getattr(stmt, "col", None),
+                    f"'forget({stmt.varname})' is not allowed: \n'{stmt.varname}' does not trace back to a 'nown' (non owning) function.\n"
+                    f"Only values returned by 'nown' functions may be manually released with forget() or free().",
                 )
             env.declare(stmt.varname, "undefined")
             return
@@ -8312,11 +8360,12 @@ def check_types(prog: Program):
         alias_targets.clear()
         alias_set.clear()
         crumb_order.clear()
+        nown_vars.clear()
         reachable = True
         for i, s in enumerate((func.body or [])):
             if not reachable:
                 print(
-                    f"[BHC-WARN-Reachability]: unreachable code in function '{func.name}' at statement index {i}"
+                    f"[BhumiCompiler-WARN-Reachability]: unreachable code in function '{func.name}' at statement index {i}"
                 )
                 check_stmt(s, func.ret_type, func)
                 continue
