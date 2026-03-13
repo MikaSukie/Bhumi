@@ -1,0 +1,27 @@
+import C_std;
+
+priv fn main() <void> {
+    int x = 42;
+
+    int *p1 = &x;
+    crumble(p1)!w=1;
+
+    int *p2 = &x;
+    crumble(p2)!r=1!w=0;
+
+    int *p3 = &x;
+    crumble(p3)!r=1!w=0;
+
+    *p1 = 100;
+    printnl(tostring(*p2));
+    printnl(tostring(*p3));
+
+    int *p4 = &x;
+    crumble(p4)!w=1;
+}
+/*
+EXPECTED OUTPUT:
+[Crawl-Checker]-[WARN]: unused write crumbs on 'p4': 1 left. [This is not an error but a security warning!]
+100
+100
+*/
