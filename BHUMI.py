@@ -210,7 +210,7 @@ def llvm_ty_of(typ: str) -> str:
             if mapped == "void":
                 return "i8*"
             return mapped + "*"
-        return f"%struct.{base}*"
+        return llvm_ty_of(base) + "*"
     if typ in enum_variant_map:
         if any(p is not None for _, p in enum_variant_map[typ]):
             return f"%enum.{typ}*"
@@ -3111,6 +3111,54 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             return raw
         lt = infer_type(expr.left)
         rt = infer_type(expr.right)
+        def _ptr_arith_offset(offset_val: str, offset_type: str) -> str:
+            off_llvm = llvm_ty_of(offset_type)
+            if off_llvm == "i64":
+                return offset_val
+            cast_t = new_tmp()
+            sign = "z" if is_unsigned_int_type(offset_type) else "s"
+            out.append(f"  {cast_t} = {sign}ext {off_llvm} {offset_val} to i64")
+            return cast_t
+        if lt.endswith("*") and not rt.endswith("*") and expr.op in {"+", "-"}:
+            llvm_ptr_ty = llvm_ty_of(lt)
+            base_ty = llvm_ptr_ty[:-1]
+            offset = _ptr_arith_offset(rhs, rt)
+            if expr.op == "-":
+                neg_t = new_tmp()
+                out.append(f"  {neg_t} = sub i64 0, {offset}")
+                offset = neg_t
+            tmp = new_tmp()
+            out.append(f"  {tmp} = getelementptr inbounds {base_ty}, {llvm_ptr_ty} {lhs}, i64 {offset}")
+            _maybe_flush_deferred(expr.left, lhs)
+            _maybe_flush_deferred(expr.right, rhs)
+            return tmp
+        if rt.endswith("*") and not lt.endswith("*") and expr.op == "+":
+            llvm_ptr_ty = llvm_ty_of(rt)
+            base_ty = llvm_ptr_ty[:-1]
+            offset = _ptr_arith_offset(lhs, lt)
+            tmp = new_tmp()
+            out.append(f"  {tmp} = getelementptr inbounds {base_ty}, {llvm_ptr_ty} {rhs}, i64 {offset}")
+            _maybe_flush_deferred(expr.left, lhs)
+            _maybe_flush_deferred(expr.right, rhs)
+            return tmp
+        if lt.endswith("*") and rt.endswith("*") and lt == rt and expr.op == "-":
+            lhs_int = new_tmp()
+            rhs_int = new_tmp()
+            llvm_ptr_ty = llvm_ty_of(lt)
+            out.append(f"  {lhs_int} = ptrtoint {llvm_ptr_ty} {lhs} to i64")
+            out.append(f"  {rhs_int} = ptrtoint {llvm_ptr_ty} {rhs} to i64")
+            diff_bytes = new_tmp()
+            out.append(f"  {diff_bytes} = sub i64 {lhs_int}, {rhs_int}")
+            base_ty = llvm_ptr_ty[:-1]
+            null_t = new_tmp()
+            size_t = new_tmp()
+            out.append(f"  {null_t} = getelementptr inbounds {base_ty}, {llvm_ptr_ty} null, i32 1")
+            out.append(f"  {size_t} = ptrtoint {llvm_ptr_ty} {null_t} to i64")
+            tmp = new_tmp()
+            out.append(f"  {tmp} = sdiv i64 {diff_bytes}, {size_t}")
+            _maybe_flush_deferred(expr.left, lhs)
+            _maybe_flush_deferred(expr.right, rhs)
+            return tmp
         common_t = unify_types(lt, rt)
         if common_t is None:
             bhumi_report_error(
@@ -4046,6 +4094,15 @@ def infer_type(expr: Expr) -> str:
     if isinstance(expr, BinOp):
         left_type = infer_type(expr.left)
         right_type = infer_type(expr.right)
+        if left_type.endswith("*") and not right_type.endswith("*") and expr.op in {"+", "-"}:
+            if expr.op in {"==", "!=", "<", "<=", ">", ">="}:
+                return "bool"
+            return left_type
+        if right_type.endswith("*") and not left_type.endswith("*") and expr.op == "+":
+            return right_type
+        if (left_type.endswith("*") and right_type.endswith("*")
+                and left_type == right_type and expr.op == "-"):
+            return "int"
         common = unify_int_types(left_type, right_type)
         if not common:
             if left_type != right_type:
@@ -4410,10 +4467,6 @@ def _make_scope_ctx() -> dict:
         "pre_owned_snapshot": set(owned_vars),
     }
 def _name_used_in_stmts(name: str, stmts) -> bool:
-    """Return True if the variable *name* appears as a Var reference anywhere
-    inside the given list of AST statements.  Used for post-match liveness
-    checks to decide whether the inner-pointer null-store (move semantics)
-    is safe to emit, or whether the matched value must be borrowed instead."""
     def _walk(node) -> bool:
         if node is None:
             return False
@@ -4570,7 +4623,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 val_expected = ptr_type[:-1]
             val = gen_expr(stmt.expr, out, expected=val_expected)
             val_ty = infer_type(stmt.expr)
-            llvm_ty = type_map.get(val_ty, f"%struct.{val_ty}")
+            llvm_ty = llvm_ty_of(val_ty)
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {ptr_val}")
         else:
             llvm_ty, ir_name = symbol_table.lookup(stmt.name)
@@ -7019,6 +7072,7 @@ def check_types(prog: Program):
     alias_creation_counter = 0
     nown_vars: set = set()
     crumb_order: Dict[str, int] = {}
+    write_revoked: set = set()
     def _inc_read(name: str, node_desc: Optional[str] = None):
         if name not in crumb_map:
             return
@@ -7184,6 +7238,15 @@ def check_types(prog: Program):
                 return typ + "*"
             inner_t = check_expr(expr.expr)
             return inner_t + "*"
+        if isinstance(expr, UnaryDeref):
+            ptr_t = check_expr(expr.ptr)
+            if not ptr_t.endswith("*"):
+                bhumi_report_error(
+                    getattr(expr, "lineno", None),
+                    getattr(expr, "col", None),
+                    f"Cannot dereference non-pointer type '{ptr_t}'",
+                )
+            return ptr_t[:-1]
         if isinstance(expr, Var):
             typ = env.lookup(expr.name)
             if not typ:
@@ -7252,6 +7315,12 @@ def check_types(prog: Program):
                         getattr(expr, "col", None),
                         f"Modulo '%' requires int or float, got {left} and {right}",
                     )
+            if left.endswith("*") and not right.endswith("*") and expr.op in {"+", "-"}:
+                return left
+            if right.endswith("*") and not left.endswith("*") and expr.op == "+":
+                return right
+            if left.endswith("*") and right.endswith("*") and left == right and expr.op == "-":
+                return "int"
             common = unify_types(left, right)
             if not common:
                 bhumi_report_error(
@@ -8089,6 +8158,14 @@ def check_types(prog: Program):
                         f"Type mismatch: attempted to store '{expr_type}' into '{ptr_type}'",
                     )
                 if base_var is not None and base_var in crumb_map:
+                    if base_var in write_revoked:
+                        bhumi_report_error(
+                            getattr(stmt, "lineno", None),
+                            getattr(stmt, "col", None),
+                            f"[Crawl-Checker]-[ERR]: write through alias '{base_var}' is not allowed"
+                            f" — its write permission was revoked by a newer mutable alias."
+                            f" Only the most recently granted mutable alias may write.",
+                        )
                     rmax, wmax, rc, wc = crumb_map[base_var]
                     if rc > 0:
                         crumb_map[base_var] = (rmax, wmax, rc - 1, wc)
@@ -8259,6 +8336,19 @@ def check_types(prog: Program):
                 )
             crumb_map[stmt.name] = (stmt.max_reads, stmt.max_writes, 0, 0)
             crumb_order[stmt.name] = getattr(stmt, "lineno", -1)
+            new_allows_write = (stmt.max_writes is None) or (stmt.max_writes > 0)
+            if new_allows_write:
+                for original, aliases in alias_targets.items():
+                    if stmt.name not in aliases:
+                        continue
+                    for other in list(aliases):
+                        if other == stmt.name or other not in crumb_map:
+                            continue
+                        rmax_o, wmax_o, rc_o, wc_o = crumb_map[other]
+                        other_allows_write = (wmax_o is None) or (wmax_o > 0)
+                        if other_allows_write:
+                            crumb_map[other] = (rmax_o, wc_o, rc_o, wc_o)
+                            write_revoked.add(other)
             return
         if isinstance(stmt, IndexAssign):
             arr_name = stmt.array
@@ -8590,6 +8680,7 @@ def check_types(prog: Program):
         alias_set.clear()
         crumb_order.clear()
         nown_vars.clear()
+        write_revoked.clear()
         reachable = True
         for i, s in enumerate((func.body or [])):
             if not reachable:
@@ -8628,35 +8719,6 @@ def check_types(prog: Program):
                     col,
                     f"Alias '{alias_name}' must have a corresponding crumble({alias_name}) statement to declare mutability (e.g. crumble({alias_name})!r=<read_count>!w=<write_count>;)",
                 )
-        for original, aliases in alias_targets.items():
-            mutable_aliases = []
-            for a in aliases:
-                if a not in crumb_map:
-                    continue
-                rmax, wmax, rc, wc = crumb_map[a]
-                allows_write = (wmax is None) or (wmax > 0)
-                if allows_write:
-                    mutable_aliases.append(a)
-            if len(mutable_aliases) <= 1:
-                continue
-            def _score(alias_name):
-                return (
-                    crumb_order.get(alias_name, -1),
-                    next(
-                        (idx for (an, _, _, _, idx) in alias_creations if an == alias_name),
-                        -1,
-                    ),
-                )
-            winner = max(mutable_aliases, key=_score)
-            for other in mutable_aliases:
-                if other == winner:
-                    continue
-                rmax, wmax, rc, wc = crumb_map[other]
-                if (wmax is None) or (wmax > 0):
-                    crumb_map[other] = (rmax, 0, rc, wc)
-                    print(
-                        f"[Crawl-Checker]-[WARN]: revoked write permission on alias '{other}' because alias '{winner}' has more recent write permissions for original '{original}'."
-                    )
         over_errors = []
         for name in _func_crumb_keys:
             rmax, wmax, rc, wc = crumb_map[name]
