@@ -740,6 +740,30 @@ def emit_cast_value(
         out.append(f"  {tmp} = icmp ne {src_llvm} {val}, null")
         return tmp
     if (
+        src_llvm.startswith("%struct.")
+        and not src_llvm.endswith("*")
+        and dst_llvm.startswith("i")
+        and not dst_llvm.endswith("*")
+    ):
+        bhumi_report_error(
+            None,
+            None,
+            f"Type mismatch: '{src_t}' to '{dst_t}'. \n"
+            "Pass a matching/change the parameter type.",
+        )
+    if (
+        dst_llvm.startswith("%struct.")
+        and not dst_llvm.endswith("*")
+        and src_llvm.startswith("i")
+        and not src_llvm.endswith("*")
+    ):
+        bhumi_report_error(
+            None,
+            None,
+            f"Type mismatch: '{src_t}' to '{dst_t}'. \n"
+            "Pass a matching/change the parameter type.",
+        )
+    if (
         src_llvm.endswith("*")
         and dst_llvm.startswith("i")
         and not dst_llvm.endswith("*")
@@ -2193,19 +2217,12 @@ def unify_int_types(t1: Optional[str], t2: Optional[str]) -> Optional[str]:
         b2, u2 = int_type_info(t2)
     except Exception:
         return None
-    if b1 > b2:
-        chosen_bits = b1
-        chosen_unsigned = u1 or (u2 and b1 == b2)
-    elif b2 > b1:
-        chosen_bits = b2
-        chosen_unsigned = u2 or (u1 and b1 == b2)
-    else:
-        chosen_bits = b1
-        chosen_unsigned = u1 or u2
-    if chosen_bits == 64:
-        return "uint" if chosen_unsigned else "int"
-    else:
-        return f"uint{chosen_bits}" if chosen_unsigned else f"int{chosen_bits}"
+    if b1 == b2 and bool(u1) == bool(u2):
+        if b1 == 64:
+            return "uint" if u1 else "int"
+        else:
+            return f"uint{b1}" if u1 else f"int{b1}"
+    return None
 def unify_types(t1: str, t2: str) -> Optional[str]:
     if t1 == t2:
         return t1
@@ -2215,15 +2232,6 @@ def unify_types(t1: str, t2: str) -> Optional[str]:
         return t1 if t1.endswith("*") or t1 == "string" else None
     if int_common := unify_int_types(t1, t2):
         return int_common
-    if (t1, t2) in {("float", "int"), ("int", "float")}:
-        return "float"
-    if (t1, t2) in {
-        ("float", "float32"),
-        ("float32", "float"),
-        ("float32", "int"),
-        ("int", "float32"),
-    }:
-        return "float32"
     return None
 type_map = {
     "int": "i64", "int8": "i8", "int16": "i16", "int32": "i32",
@@ -3678,18 +3686,35 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     llvm_ty, ssa_or_const = _promote_variadic_and_emit(a_val, a_ty, out)
                     args_ir.append(f"{llvm_ty} {ssa_or_const}")
         else:
-            for a_val, a_ty in zip(arg_vals, arg_types):
-                if a_ty == "#":
-                    bhumi_report_error(
-                        getattr(expr, "lineno", None),
-                        getattr(expr, "col", None),
-                        f"Cannot determine argument LLVM type for call '{expr.name}': argument type is '#'.",
-                    )
-                llvm_ty = llvm_ty_of(a_ty)
-                if a_val is None:
-                    args_ir.append(f"{llvm_ty} {zero_const_for_llvm(llvm_ty)}")
-                else:
-                    args_ir.append(f"{llvm_ty} {a_val}")
+            fn_def = next((f for f in all_funcs if f.name == expr.name), None)
+            if fn_def is not None and getattr(fn_def, "params", None):
+                for (param_typ, _), a_val, a_ty in zip(fn_def.params, arg_vals, arg_types):
+                    llvm_param_ty = llvm_ty_of(param_typ)
+                    if a_val is None:
+                        args_ir.append(f"{llvm_param_ty} {zero_const_for_llvm(llvm_param_ty)}")
+                    else:
+                        cast_tmp = emit_cast_value(a_val, a_ty, param_typ, out)
+                        args_ir.append(f"{llvm_param_ty} {cast_tmp}")
+                if getattr(fn_def, "is_variadic", False):
+                    fixed_count = len(fn_def.params)
+                    for idx in range(fixed_count, len(arg_vals)):
+                        a_val = arg_vals[idx]
+                        a_ty = arg_types[idx]
+                        llvm_ty, ssa_or_const = _promote_variadic_and_emit(a_val, a_ty, out)
+                        args_ir.append(f"{llvm_ty} {ssa_or_const}")
+            else:
+                for a_val, a_ty in zip(arg_vals, arg_types):
+                    if a_ty == "#":
+                        bhumi_report_error(
+                            getattr(expr, "lineno", None),
+                            getattr(expr, "col", None),
+                            f"Cannot determine argument LLVM type for call '{expr.name}': argument type is '#'.",
+                        )
+                    llvm_ty = llvm_ty_of(a_ty)
+                    if a_val is None:
+                        args_ir.append(f"{llvm_ty} {zero_const_for_llvm(llvm_ty)}")
+                    else:
+                        args_ir.append(f"{llvm_ty} {a_val}")
         ret_ty = func_table.get(call_target, None)
         if ret_ty is None:
             if expected is not None:
