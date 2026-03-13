@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ [-GPL2.0 license-] """
 import argparse
+import functools
 import os
 import re
 import sys
@@ -169,6 +170,11 @@ class TypeEnv:
             if name in scope:
                 return scope[name]
         return None
+_RE_GENERIC   = re.compile(r"([A-Za-z_]\w*)<(.+)>(\*?)")
+_RE_ITYPE     = re.compile(r"i\d+(\*)?")
+_RE_FIXED_ARR = re.compile(r"([A-Za-z_]\w*\**)\[(\d+)]")
+_RE_UNSZ_ARR  = re.compile(r"([A-Za-z_]\w*\**)\[]"), 
+@functools.lru_cache(maxsize=2048)
 def llvm_ty_of(typ: str) -> str:
     if typ == "#":
         bhumi_report_error(
@@ -176,12 +182,12 @@ def llvm_ty_of(typ: str) -> str:
             None,
             "Internal compiler error: encountered placeholder '#' in llvm_ty_of, missing monomorphisation",
         )
-    _generic_m = re.fullmatch(r"([A-Za-z_]\w*)<(.+)>(\*?)", typ)
+    _generic_m = _RE_GENERIC.fullmatch(typ)
     if _generic_m:
         base_g, inner_g, ptr_g = _generic_m.group(1), _generic_m.group(2), _generic_m.group(3)
-        mono_g = ensure_monomorph_for_enum(base_g, [inner_g]) if base_g in globals().get("original_enum_defs", {}) else base_g + "__mono__" + inner_g
+        mono_g = ensure_monomorph_for_enum(base_g, [inner_g]) if base_g in original_enum_defs else base_g + "__mono__" + inner_g
         typ = mono_g + ptr_g
-    if re.fullmatch(r"i\d+(\*)?", typ):
+    if _RE_ITYPE.fullmatch(typ):
         return typ
     if typ == "void":
         return "void"
@@ -218,12 +224,12 @@ def llvm_ty_of(typ: str) -> str:
         if type_map[typ] == "void":
             return "void"
         return type_map[typ]
-    _fixed_arr_m = re.fullmatch(r"([A-Za-z_]\w*\**)\[(\d+)]", typ)
+    _fixed_arr_m = _RE_FIXED_ARR.fullmatch(typ)
     if _fixed_arr_m:
         elem_base, count = _fixed_arr_m.group(1), _fixed_arr_m.group(2)
         elem_llvm = llvm_ty_of(elem_base)
         return f"[{count} x {elem_llvm}]*"
-    _unsized_arr_m = re.fullmatch(r"([A-Za-z_]\w*\**)\[]", typ)
+    _unsized_arr_m = _RE_UNSZ_ARR.fullmatch(typ)
     if _unsized_arr_m:
         elem_base = _unsized_arr_m.group(1)
         elem_llvm = llvm_ty_of(elem_base)
@@ -283,7 +289,7 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
         mononame = base_name
     if mononame in enum_variant_map:
         return mononame
-    template = globals().get("original_enum_defs", {}).get(base_name)
+    template = original_enum_defs.get(base_name)
     if template is None:
         bhumi_report_error(None, None, f"Attempted to monomorph unknown enum '{base_name}'")
     if len(template.type_params) != len(actual_types):
@@ -328,12 +334,9 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
     enum_variant_map[mononame] = new_variants
     if base_name in type_map:
         type_map[mononame] = type_map[base_name]
+    llvm_ty_of.cache_clear()
     for vname, payload in new_variants:
-        gm = globals().get("variant_map_global")
-        if gm is None:
-            gm = {}
-            globals()["variant_map_global"] = gm
-        gm.setdefault(vname, []).append((mononame, payload))
+        variant_map_global.setdefault(vname, []).append((mononame, payload))
     return mononame
 def ensure_monomorph_call(
     call_expr: "Call", out: List[str], expected_ret: Optional[str] = None
@@ -1157,6 +1160,9 @@ generated_mono: Dict[str, bool] = {}
 all_funcs: List[Func] = []
 _func_name_map: Dict[str, "Func"] = {}
 enum_variant_map: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+original_enum_defs: Dict[str, Any] = {}
+variant_map_global: Dict[str, list] = {}
+__bhumi_current_codegen_fn: Any = None
 loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
@@ -3314,7 +3320,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         qualified_enum is None or ename == qualified_enum
                 ):
                     candidates.append((ename, idx, payload))
-        gm = globals().get("variant_map_global")
+        gm = variant_map_global
         if gm and expr.name in gm:
             existing_enames = {c[0] for c in candidates}
             for ename, payload in gm[expr.name]:
@@ -3349,7 +3355,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}->{variant_name}(...)")
                 bhumi_report_error(use_site_line, use_site_col, "\n".join(msg_lines))
         if found_enum is not None:
-            template = globals().get("original_enum_defs", {}).get(found_enum)
+            template = original_enum_defs.get(found_enum)
             if template and template.type_params:
                 actuals: List[str] = []
                 def _normalize_expected(exp_str):
@@ -4118,7 +4124,7 @@ def infer_type(expr: Expr) -> str:
                 continue
             for vname, payload in variants:
                 if vname == _infer_variant_name:
-                    _orig_edef = globals().get("original_enum_defs", {}).get(ename)
+                    _orig_edef = original_enum_defs.get(ename)
                     _tparams = getattr(_orig_edef, "type_params", []) if _orig_edef else []
                     _infer_matches.append((ename, payload, bool(_tparams)))
                     break
@@ -4126,7 +4132,7 @@ def infer_type(expr: Expr) -> str:
             _concrete_matches = [(e, p, g) for e, p, g in _infer_matches if not g]
             _chosen = _concrete_matches[0] if _concrete_matches else _infer_matches[0]
             ename, payload, has_tparams = _chosen
-            _orig_edef = globals().get("original_enum_defs", {}).get(ename)
+            _orig_edef = original_enum_defs.get(ename)
             _tparams = getattr(_orig_edef, "type_params", []) if _orig_edef else []
             if _tparams and payload is not None and payload in _tparams and expr.args:
                 if len(_tparams) == 1:
@@ -4134,7 +4140,7 @@ def infer_type(expr: Expr) -> str:
                     _mono = ensure_monomorph_for_enum(ename, [_actual_t])
                     return _mono + "*"
                 else:
-                    _orig_edef2 = globals().get("original_enum_defs", {}).get(ename)
+                    _orig_edef2 = original_enum_defs.get(ename)
                     _tparams2 = getattr(_orig_edef2, "type_params", []) if _orig_edef2 else []
                     if _orig_edef2 and _tparams2 and expr.args:
                         _arg_types2 = [infer_type(a) for a in expr.args]
@@ -4710,7 +4716,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             f"Set crumble({vn})!r=<count>; to silence this.",
                             file=__import__("sys").stderr,
                         )
-            curfn = globals().get("__bhumi_current_codegen_fn", None)
+            curfn = __bhumi_current_codegen_fn
             if curfn is not None and getattr(curfn, "is_vasync", False):
                 cap = getattr(curfn, "_vasync_captured", set()) or set()
                 exc = set(getattr(curfn, "vasync_except", []) or [])
@@ -4729,19 +4735,16 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     return
             if handled_write_exhaustion_new_alloc:
                 return
+            _stmt_expr_ty = infer_type(stmt.expr)
             _reassign_allocs_new = (
                 (
                     isinstance(stmt.expr, BinOp)
                     and stmt.expr.op == "+"
-                    and infer_type(stmt.expr) == "string"
+                    and _stmt_expr_ty == "string"
                 )
                 or (
                     isinstance(stmt.expr, Call)
-                    and infer_type(stmt.expr) is not None
-                    and (
-                        infer_type(stmt.expr) == "string"
-                        or infer_type(stmt.expr).endswith("*")
-                    )
+                    and (_stmt_expr_ty == "string" or _stmt_expr_ty.endswith("*"))
                 )
             )
             _rhs_takes_lhs = False
@@ -4783,7 +4786,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"{_drop_old_skip}:")
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {addr_token}")
             if isinstance(stmt.expr, Call):
-                ret_t = infer_type(stmt.expr)
+                ret_t = _stmt_expr_ty
                 _nown_assign = (
                     stmt.expr.name in _NOWN_BUILTIN_FUNCS
                     or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
@@ -4792,7 +4795,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     owned_vars.add(vn)
                     if vn in crumb_runtime:
                         crumb_runtime[vn]["owned"] = True
-            elif isinstance(stmt.expr, BinOp) and stmt.expr.op == "+" and infer_type(stmt.expr) == "string":
+            elif isinstance(stmt.expr, BinOp) and stmt.expr.op == "+" and _stmt_expr_ty == "string":
                 owned_vars.add(vn)
                 if vn in crumb_runtime:
                     crumb_runtime[vn]["owned"] = True
@@ -5122,7 +5125,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         elif base in enum_variant_map:
             enum_name = base
         if enum_name is not None:
-            _orig_edef = globals().get("original_enum_defs", {}).get(enum_name)
+            _orig_edef = original_enum_defs.get(enum_name)
             if _orig_edef and getattr(_orig_edef, "type_params", []):
                 for _ename, _variants in enum_variant_map.items():
                     if "__mono__" not in _ename:
@@ -5360,7 +5363,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 and payload_type not in type_map
                 and payload_type not in enum_variant_map
             ):
-                _orig_edef = globals().get("original_enum_defs", {}).get(
+                _orig_edef = original_enum_defs.get(
                     enum_name.split("__mono__")[0] if "__mono__" in enum_name else enum_name
                 )
                 _tparams = set(getattr(_orig_edef, "type_params", [])) if _orig_edef else set()
@@ -5508,7 +5511,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         out.append(f"{_env_done_lbl}:")
                     owned_vars.discard(stmt.expr.name)
 def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
-    orig = globals().get("original_enum_defs", {})
+    orig = original_enum_defs
     base = typ.rstrip("*")
     if base.startswith("%enum."):
         base = base[len("%enum."):]
@@ -5529,6 +5532,7 @@ def _check_no_bare_generic(typ: str, context: str, lineno=None, col=None):
             f"Did you mean '{base}<{needed}>'?"
         )
 def gen_func(fn: Func) -> List[str]:
+    global __bhumi_current_codegen_fn
     _saved_outer_alloca_buf = list(_entry_alloca_buf)
     _saved_outer_scope_drop = list(scope_drop_stack)
     _saved_outer_crumb = dict(crumb_runtime)
@@ -5596,7 +5600,7 @@ def gen_func(fn: Func) -> List[str]:
         return lines
     symbol_table.push()
     generated_mono[fn.name] = True
-    globals()["__bhumi_current_codegen_fn"] = fn
+    __bhumi_current_codegen_fn = fn
     if fn.name == "main":
         ret_ty = "i32"
         out = [f"define i32 @main(i32 %argc, i8** %argv) {{", "entry:"]
@@ -5738,7 +5742,7 @@ def gen_func(fn: Func) -> List[str]:
         else:
             out.append(f"  ret {ret_ty} null")
     out.append("}")
-    globals()["__bhumi_current_codegen_fn"] = None
+    __bhumi_current_codegen_fn = None
     symbol_table.pop()
     return out
 def annotate_types(prog: Program) -> None:
@@ -5877,14 +5881,14 @@ def annotate_types(prog: Program) -> None:
                     continue
                 for vname, payload in variants:
                     if vname == variant_name:
-                        orig = globals().get("original_enum_defs", {}).get(ename)
+                        orig = original_enum_defs.get(ename)
                         tparams = getattr(orig, "type_params", []) if orig else []
                         matches.append((ename, payload, bool(tparams)))
                         break
             if matches:
                 concrete = [(e, p, g) for e, p, g in matches if not g]
                 chosen_enum, chosen_payload, has_tparams = (concrete[0] if concrete else matches[0])
-                orig_edef = globals().get("original_enum_defs", {}).get(chosen_enum)
+                orig_edef = original_enum_defs.get(chosen_enum)
                 tparams = getattr(orig_edef, "type_params", []) if orig_edef else []
                 payload_expected: Optional[str] = None
                 if has_tparams and chosen_payload is not None and chosen_payload in tparams:
@@ -6764,6 +6768,176 @@ done:
 """
     runtime_block_noop = """
 @.alloc_magic = global i64 0
+; --- Lightweight heap-tracking table for noop mode ---
+; Both bhumi_malloc and bhumi_ctbl_insert register pointers here.
+; bhumi_safe_c_free checks before freeing so static string literals are never touched.
+@.nrt_tbl_ptr = global i8** null
+@.nrt_tbl_cap = global i64 0
+@.nrt_tbl_cnt = global i64 0
+define void @nrt_tbl_raw_insert(i8** %slots, i64 %cap, i8* %ptr) {
+entry:
+  %mask = sub i64 %cap, 1
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %probe
+probe:
+  %slot = phi i64 [ %hash, %entry ], [ %next_wrap, %occupied ]
+  %ep = getelementptr i8*, i8** %slots, i64 %slot
+  %cur = load i8*, i8** %ep
+  %is_empty = icmp eq i8* %cur, null
+  br i1 %is_empty, label %do_store, label %occupied
+occupied:
+  %next = add i64 %slot, 1
+  %next_wrap = and i64 %next, %mask
+  br label %probe
+do_store:
+  store i8* %ptr, i8** %ep
+  ret void
+}
+define void @nrt_tbl_grow(i64 %newcap) {
+entry:
+  %nbytes = mul i64 %newcap, 8
+  %raw = call i8* @malloc(i64 %nbytes)
+  %new_slots = bitcast i8* %raw to i8**
+  br label %zero_loop
+zero_loop:
+  %zi = phi i64 [ 0, %entry ], [ %zi_next, %zero_loop ]
+  %zep = getelementptr i8*, i8** %new_slots, i64 %zi
+  store i8* null, i8** %zep
+  %zi_next = add i64 %zi, 1
+  %zi_done = icmp eq i64 %zi_next, %newcap
+  br i1 %zi_done, label %rehash, label %zero_loop
+rehash:
+  %old_slots = load i8**, i8*** @.nrt_tbl_ptr
+  %old_cap   = load i64, i64* @.nrt_tbl_cap
+  %old_null  = icmp eq i8** %old_slots, null
+  br i1 %old_null, label %rehash_done, label %rehash_loop
+rehash_loop:
+  %ri = phi i64 [ 0, %rehash ], [ %ri_next, %rehash_cont ]
+  %rep = getelementptr i8*, i8** %old_slots, i64 %ri
+  %rval = load i8*, i8** %rep
+  %r_empty = icmp eq i8* %rval, null
+  br i1 %r_empty, label %rehash_cont, label %do_reinsert
+do_reinsert:
+  call void @nrt_tbl_raw_insert(i8** %new_slots, i64 %newcap, i8* %rval)
+  br label %rehash_cont
+rehash_cont:
+  %ri_next = add i64 %ri, 1
+  %ri_done = icmp eq i64 %ri_next, %old_cap
+  br i1 %ri_done, label %free_old, label %rehash_loop
+free_old:
+  %old_raw = bitcast i8** %old_slots to i8*
+  call void @free(i8* %old_raw)
+  br label %rehash_done
+rehash_done:
+  store i8** %new_slots, i8*** @.nrt_tbl_ptr
+  store i64 %newcap,     i64*  @.nrt_tbl_cap
+  ret void
+}
+define void @nrt_tbl_ensure_init() {
+entry:
+  %cap = load i64, i64* @.nrt_tbl_cap
+  %need_init = icmp eq i64 %cap, 0
+  br i1 %need_init, label %do_init, label %done
+do_init:
+  call void @nrt_tbl_grow(i64 64)
+  br label %done
+done:
+  ret void
+}
+define void @nrt_tbl_insert(i8* %ptr) {
+entry:
+  %is_null = icmp eq i8* %ptr, null
+  br i1 %is_null, label %done, label %do_insert
+do_insert:
+  call void @nrt_tbl_ensure_init()
+  %cnt = load i64, i64* @.nrt_tbl_cnt
+  %cap = load i64, i64* @.nrt_tbl_cap
+  %cnt4 = mul i64 %cnt, 4
+  %cap3 = mul i64 %cap, 3
+  %overload = icmp uge i64 %cnt4, %cap3
+  br i1 %overload, label %do_grow, label %do_insert2
+do_grow:
+  %newcap = mul i64 %cap, 2
+  call void @nrt_tbl_grow(i64 %newcap)
+  br label %do_insert2
+do_insert2:
+  %slots = load i8**, i8*** @.nrt_tbl_ptr
+  %cap2  = load i64, i64* @.nrt_tbl_cap
+  call void @nrt_tbl_raw_insert(i8** %slots, i64 %cap2, i8* %ptr)
+  %cnt2 = load i64, i64* @.nrt_tbl_cnt
+  %cnt3 = add i64 %cnt2, 1
+  store i64 %cnt3, i64* @.nrt_tbl_cnt
+  br label %done
+done:
+  ret void
+}
+define i1 @nrt_tbl_contains(i8* %ptr) {
+entry:
+  %is_null = icmp eq i8* %ptr, null
+  br i1 %is_null, label %ret_false, label %check_init
+check_init:
+  %cap = load i64, i64* @.nrt_tbl_cap
+  %no_cap = icmp eq i64 %cap, 0
+  br i1 %no_cap, label %ret_false, label %do_probe
+do_probe:
+  %mask = sub i64 %cap, 1
+  %slots = load i8**, i8*** @.nrt_tbl_ptr
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %probe
+probe:
+  %slot = phi i64 [ %hash, %do_probe ], [ %next_wrap, %cont ]
+  %ep = getelementptr i8*, i8** %slots, i64 %slot
+  %cur = load i8*, i8** %ep
+  %is_empty = icmp eq i8* %cur, null
+  br i1 %is_empty, label %ret_false, label %check_match
+check_match:
+  %match = icmp eq i8* %cur, %ptr
+  br i1 %match, label %ret_true, label %cont
+cont:
+  %next = add i64 %slot, 1
+  %next_wrap = and i64 %next, %mask
+  br label %probe
+ret_true:
+  ret i1 1
+ret_false:
+  ret i1 0
+}
+define void @nrt_tbl_remove(i8* %ptr) {
+entry:
+  %cap = load i64, i64* @.nrt_tbl_cap
+  %is_empty_tbl = icmp eq i64 %cap, 0
+  br i1 %is_empty_tbl, label %not_found, label %do_remove
+do_remove:
+  %mask = sub i64 %cap, 1
+  %slots = load i8**, i8*** @.nrt_tbl_ptr
+  %pint = ptrtoint i8* %ptr to i64
+  %hash = and i64 %pint, %mask
+  br label %find_loop
+find_loop:
+  %fi = phi i64 [ %hash, %do_remove ], [ %fwrap, %find_cont ]
+  %fep = getelementptr i8*, i8** %slots, i64 %fi
+  %fcur = load i8*, i8** %fep
+  %is_null = icmp eq i8* %fcur, null
+  br i1 %is_null, label %not_found, label %check_match
+check_match:
+  %match = icmp eq i8* %fcur, %ptr
+  br i1 %match, label %found, label %find_cont
+find_cont:
+  %fnext = add i64 %fi, 1
+  %fwrap = and i64 %fnext, %mask
+  br label %find_loop
+found:
+  store i8* null, i8** %fep
+  %cnt_r = load i64, i64* @.nrt_tbl_cnt
+  %cnt_r1 = sub i64 %cnt_r, 1
+  store i64 %cnt_r1, i64* @.nrt_tbl_cnt
+  ret void
+not_found:
+  ret void
+}
+; --- Runtime stubs ---
 define void @bhumi_signal_handler(i32 %sig) {
 entry:
   ret void
@@ -6784,21 +6958,38 @@ define void @bhumi_vvolatile_abort() {
 entry:
   ret void
 }
+; bhumi_malloc registers every allocation so bhumi_safe_c_free can tell heap from static
 define i8* @bhumi_malloc(i64 %usize) {
 entry:
   %p = call i8* @malloc(i64 %usize)
+  %is_null = icmp eq i8* %p, null
+  br i1 %is_null, label %done, label %track
+track:
+  call void @nrt_tbl_insert(i8* %p)
+  br label %done
+done:
   ret i8* %p
 }
 define void @bhumi_free(i8* %userptr) {
 entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %do_remove
+do_remove:
+  call void @nrt_tbl_remove(i8* %userptr)
   call void @free(i8* %userptr)
+  br label %done
+done:
   ret void
 }
 define void @bhumi_c_free(i8* %userptr) {
 entry:
   %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %done, label %do_free
+  br i1 %is_null, label %done, label %check
+check:
+  %tracked = call i1 @nrt_tbl_contains(i8* %userptr)
+  br i1 %tracked, label %do_free, label %done
 do_free:
+  call void @nrt_tbl_remove(i8* %userptr)
   call void @free(i8* %userptr)
   br label %done
 done:
@@ -6807,13 +6998,18 @@ done:
 define void @bhumi_ffi_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
-  br i1 %is_null, label %done, label %do_free
+  br i1 %is_null, label %done, label %check
+check:
+  %tracked = call i1 @nrt_tbl_contains(i8* %userptr)
+  br i1 %tracked, label %do_free, label %done
 do_free:
+  call void @nrt_tbl_remove(i8* %userptr)
   call void @free(i8* %userptr)
   br label %done
 done:
   ret void
 }
+; bhumi_tbl stubs (no ownership tracking in noop mode)
 define void @bhumi_tbl_insert(i8* %ptr) {
 entry:
   ret void
@@ -6826,20 +7022,35 @@ define i1 @bhumi_tbl_contains(i8* %ptr) {
 entry:
   ret i1 0
 }
+; ctbl routes through the nrt table so C FFI allocations are also tracked
 define void @bhumi_ctbl_insert(i8* %ptr) {
 entry:
+  call void @nrt_tbl_insert(i8* %ptr)
   ret void
 }
 define void @bhumi_ctbl_remove(i8* %ptr) {
 entry:
+  call void @nrt_tbl_remove(i8* %ptr)
   ret void
 }
 define i1 @bhumi_ctbl_contains(i8* %ptr) {
 entry:
-  ret i1 0
+  %r = call i1 @nrt_tbl_contains(i8* %ptr)
+  ret i1 %r
 }
+; Only frees if the pointer is in the nrt table — static literals are never touched
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
+  %is_null = icmp eq i8* %userptr, null
+  br i1 %is_null, label %done, label %check
+check:
+  %tracked = call i1 @nrt_tbl_contains(i8* %userptr)
+  br i1 %tracked, label %do_free, label %done
+do_free:
+  call void @nrt_tbl_remove(i8* %userptr)
+  call void @free(i8* %userptr)
+  br label %done
+done:
   ret void
 }
 define i64 @bhumi_alloc_size(i8* %userptr) {
@@ -7098,6 +7309,7 @@ def check_types(prog: Program):
         env.declare(ename, ename)
         if not has_payload:
             type_map[ename] = type_map.get("int", "i64")
+    llvm_ty_of.cache_clear()
     for ename, edef in enum_defs.items():
         for v in edef.variants:
             variant_map.setdefault(v.name, []).append((ename, v.typ))
@@ -7568,7 +7780,7 @@ def check_types(prog: Program):
                     )
                 return "int"
             candidates = variant_map.get(variant_name, []).copy()
-            gm = globals().get("variant_map_global", {})
+            gm = variant_map_global
             candidates.extend(gm.get(variant_name, []))
             if candidates:
                 chosen = None
@@ -7588,7 +7800,7 @@ def check_types(prog: Program):
                         }
                         def _pretty_enum_name_err(raw: str) -> str:
                             base = raw.partition("__mono__")[0] if "__mono__" in raw else raw
-                            orig = globals().get("original_enum_defs", {}).get(base)
+                            orig = original_enum_defs.get(base)
                             if orig is None:
                                 return base
                             tps = getattr(orig, "type_params", [])
@@ -7613,7 +7825,7 @@ def check_types(prog: Program):
                         for (ename, payload) in candidates
                         if "__mono__" in ename or ename not in mono_bases
                     ]
-                _orig_defs = globals().get("original_enum_defs", {})
+                _orig_defs = original_enum_defs
                 concrete_candidates = [
                     (ename, payload) for (ename, payload) in candidates
                     if not (
@@ -7651,7 +7863,7 @@ def check_types(prog: Program):
                 if len(candidates) > 1:
                     def _pretty_enum_name(raw: str) -> str:
                         base = raw.partition("__mono__")[0] if "__mono__" in raw else raw
-                        orig = globals().get("original_enum_defs", {}).get(base)
+                        orig = original_enum_defs.get(base)
                         if orig is None:
                             return base
                         type_params = getattr(orig, "type_params", [])
@@ -7681,7 +7893,7 @@ def check_types(prog: Program):
                 chosen = candidates[0]
                 enum_name, payload = chosen
                 _mono_base = enum_name.split("__mono__")[0] if "__mono__" in enum_name else enum_name
-                _orig_edef = globals().get("original_enum_defs", {}).get(_mono_base)
+                _orig_edef = original_enum_defs.get(_mono_base)
                 _type_params = getattr(_orig_edef, "type_params", []) if _orig_edef else []
                 if (
                     "__mono__" in enum_name
