@@ -170,24 +170,26 @@ class TypeEnv:
             if name in scope:
                 return scope[name]
         return None
-_RE_GENERIC   = re.compile(r"([A-Za-z_]\w*)<(.+)>(\*?)")
-_RE_ITYPE     = re.compile(r"i\d+(\*)?")
-_RE_FIXED_ARR = re.compile(r"([A-Za-z_]\w*\**)\[(\d+)]")
-_RE_UNSZ_ARR  = re.compile(r"([A-Za-z_]\w*\**)\[]"), 
-@functools.lru_cache(maxsize=2048)
 def llvm_ty_of(typ: str) -> str:
+    cached = _llvm_ty_cache.get(typ)
+    if cached is not None:
+        return cached
+    result = _llvm_ty_of_impl(typ)
+    _llvm_ty_cache[typ] = result
+    return result
+def _llvm_ty_of_impl(typ: str) -> str:
     if typ == "#":
         bhumi_report_error(
             None,
             None,
             "Internal compiler error: encountered placeholder '#' in llvm_ty_of, missing monomorphisation",
         )
-    _generic_m = _RE_GENERIC.fullmatch(typ)
+    _generic_m = re.fullmatch(r"([A-Za-z_]\w*)<(.+)>(\*?)", typ)
     if _generic_m:
         base_g, inner_g, ptr_g = _generic_m.group(1), _generic_m.group(2), _generic_m.group(3)
         mono_g = ensure_monomorph_for_enum(base_g, [inner_g]) if base_g in original_enum_defs else base_g + "__mono__" + inner_g
         typ = mono_g + ptr_g
-    if _RE_ITYPE.fullmatch(typ):
+    if re.fullmatch(r"i\d+(\*)?", typ):
         return typ
     if typ == "void":
         return "void"
@@ -224,12 +226,12 @@ def llvm_ty_of(typ: str) -> str:
         if type_map[typ] == "void":
             return "void"
         return type_map[typ]
-    _fixed_arr_m = _RE_FIXED_ARR.fullmatch(typ)
+    _fixed_arr_m = re.fullmatch(r"([A-Za-z_]\w*\**)\[(\d+)]", typ)
     if _fixed_arr_m:
         elem_base, count = _fixed_arr_m.group(1), _fixed_arr_m.group(2)
         elem_llvm = llvm_ty_of(elem_base)
         return f"[{count} x {elem_llvm}]*"
-    _unsized_arr_m = _RE_UNSZ_ARR.fullmatch(typ)
+    _unsized_arr_m = re.fullmatch(r"([A-Za-z_]\w*\**)\[]", typ)
     if _unsized_arr_m:
         elem_base = _unsized_arr_m.group(1)
         elem_llvm = llvm_ty_of(elem_base)
@@ -334,7 +336,7 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
     enum_variant_map[mononame] = new_variants
     if base_name in type_map:
         type_map[mononame] = type_map[base_name]
-    llvm_ty_of.cache_clear()
+    _llvm_ty_cache.clear()
     for vname, payload in new_variants:
         variant_map_global.setdefault(vname, []).append((mononame, payload))
     return mononame
@@ -1176,6 +1178,7 @@ _ar_spill_val_to_name: Dict[str, str] = {}
 _fn_body_remaining: List = []
 _expr_type_cache: Dict[int, str] = {}
 _parse_cache: Dict[str, Any] = {}
+_llvm_ty_cache: Dict[str, str] = {}
 _NOWN_BUILTIN_FUNCS: frozenset = frozenset({
     "bhumi_argv",
 })
@@ -7309,7 +7312,7 @@ def check_types(prog: Program):
         env.declare(ename, ename)
         if not has_payload:
             type_map[ename] = type_map.get("int", "i64")
-    llvm_ty_of.cache_clear()
+    _llvm_ty_cache.clear()
     for ename, edef in enum_defs.items():
         for v in edef.variants:
             variant_map.setdefault(v.name, []).append((ename, v.typ))
@@ -9394,6 +9397,7 @@ def main():
     compiled = args.input
     _expr_type_cache.clear()
     _parse_cache.clear()
+    _llvm_ty_cache.clear()
     with open(args.input, encoding="utf-8", errors="ignore") as f:
         src = f.read()
     tokens = lex(src)
