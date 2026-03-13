@@ -1904,7 +1904,10 @@ class Parser:
         expr = None
         if self.match("EQUAL"):
             expr = self.parse_expr()
-        self.expect("SEMI")
+        if not isinstance(expr, StructInit):
+            self.expect("SEMI")
+        else:
+            self.match("SEMI")
         var_decl = VarDecl(access, typ, name, expr, nomd)
         self.declared_vars[name] = var_decl
         return var_decl
@@ -2105,8 +2108,9 @@ class Parser:
                     fields_list: List[Tuple[str, Expr]] = []
                     while self.peek().kind != "RBRACE":
                         fname = self.expect("IDENT").value
-                        self.expect("COLON")
+                        self.expect("LPAREN")
                         fexpr = self.parse_expr()
+                        self.expect("RPAREN")
                         self.expect("SEMI")
                         fields_list.append((fname, fexpr))
                     self.expect("RBRACE")
