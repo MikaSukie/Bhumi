@@ -2486,8 +2486,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             ret_llvm = llvm_ty_of(base_fn.ret_type) if base_fn else "i64"
             _handle_free_tmp = new_tmp()
             out.append(f"  {_handle_free_tmp} = bitcast {struct_name}* {handle_tmp} to i8*")
-            out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
             if ret_llvm == "void":
+                out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
                 return None
             res_ptr = new_tmp()
             out.append(
@@ -2495,6 +2495,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             )
             await_ret = new_tmp()
             out.append(f"  {await_ret} = load {ret_llvm}, {ret_llvm}* {res_ptr}")
+            out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
             return await_ret
         else:
             out.append("  ; await of non-call expression is not supported here")
