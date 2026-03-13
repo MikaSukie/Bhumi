@@ -375,14 +375,13 @@ int countcontain(const char* str, const char* substr) {
 }
 
 char* charat(int64_t idx, const char* s) {
-    if (!s) return "NULL";
+    if (!s) return safe_strdup("NULL");
     size_t len = strlen(s);
-    if (idx == -1)                    return "SOF";
-    if (idx == (int64_t)len)          return "EOF";
-    if (idx < 0 || (size_t)idx >= len) return "OOB";
+    if (idx == -1)                     return safe_strdup("SOF");
+    if (idx == (int64_t)len)           return safe_strdup("EOF");
+    if (idx < 0 || (size_t)idx >= len) return safe_strdup("OOB");
     char c = s[(size_t)idx];
-    if (c == '\n' || c == '\r')
-        return "NL";
+    if (c == '\n' || c == '\r')        return safe_strdup("NL");
     char tmp[2] = { c, '\0' };
     return safe_strdup(tmp);
 }
@@ -440,17 +439,17 @@ char* tal(const char* s) {
     return result;
 }
 
-const char* get_os() {
+char* get_os() {
 #if defined(_WIN32)
-    return "windows";
+    return safe_strdup("windows");
 #elif defined(__APPLE__)
-    return "macos";
+    return safe_strdup("macos");
 #elif defined(__linux__)
-    return "linux";
+    return safe_strdup("linux");
 #elif defined(__unix__)
-    return "unix";
+    return safe_strdup("unix");
 #else
-    return "unknown";
+    return safe_strdup("unknown");
 #endif
 }
 
@@ -558,14 +557,13 @@ void Ufree_union(int64_t h) {
     free(v);
 }
 
-const char* get_os_max_bits() {
+char* get_os_max_bits() {
 #if defined(_WIN64) || defined(__x86_64__) || defined(__ppc64__) || defined(__aarch64__)
-    return "64";
+    return safe_strdup("64");
 #elif defined(_WIN32) || defined(__i386__) || defined(__arm__)
-    return "32";
+    return safe_strdup("32");
 #else
-    return sizeof(void*) == 8 ? "64" :
-           sizeof(void*) == 4 ? "32" : "unknown";
+    return safe_strdup(sizeof(void*) == 8 ? "64" :
+                       sizeof(void*) == 4 ? "32" : "unknown");
 #endif
 }
-
