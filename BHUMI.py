@@ -666,6 +666,40 @@ def emit_cast_value(
     dst_llvm = llvm_ty_of(dst_t)
     if src_llvm == dst_llvm:
         return val
+    _src_is_struct_val = src_llvm.startswith("%struct.") and not src_llvm.endswith("*")
+    _dst_is_struct_ptr = dst_llvm.startswith("%struct.") and dst_llvm.endswith("*")
+    if _src_is_struct_val and _dst_is_struct_ptr:
+        src_struct = src_llvm[len("%struct."):]
+        dst_struct = dst_llvm[len("%struct."):-1]
+        if src_struct == dst_struct:
+            bhumi_report_error(
+                None, None,
+                f"Type mismatch: argument is '{src_t}' (struct value) but parameter expects "
+                f"'{dst_t}' (pointer to struct). "
+                f"Pass a pointer using the address-of operator: &myVar",
+            )
+        else:
+            bhumi_report_error(
+                None, None,
+                f"Type mismatch: argument is struct '{src_t}' but parameter expects pointer '{dst_t}'.",
+            )
+    _src_is_struct_ptr = src_llvm.startswith("%struct.") and src_llvm.endswith("*")
+    _dst_is_struct_val = dst_llvm.startswith("%struct.") and not dst_llvm.endswith("*")
+    if _src_is_struct_ptr and _dst_is_struct_val:
+        src_struct = src_llvm[len("%struct."):-1]
+        dst_struct = dst_llvm[len("%struct."):]
+        if src_struct == dst_struct:
+            bhumi_report_error(
+                None, None,
+                f"Type mismatch: argument is '{src_t}' (pointer to struct) but parameter expects "
+                f"'{dst_t}' (struct value). "
+                f"Dereference the pointer: *myPtr",
+            )
+        else:
+            bhumi_report_error(
+                None, None,
+                f"Type mismatch: argument is pointer '{src_t}' but parameter expects struct value '{dst_t}'.",
+            )
     if src_llvm.startswith("%enum.") and src_llvm.endswith("*"):
         enum_name = src_llvm[len("%enum."):-1]
         variants = enum_variant_map.get(enum_name, [])
@@ -1074,6 +1108,7 @@ class Match(Stmt):
 class StructInit(Expr):
     name: str
     fields: List[Tuple[str, Expr]]
+    stack: bool = False
 @dataclass
 class ArrayInit(Expr):
     elements: List[Expr]
@@ -3908,6 +3943,23 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
     if isinstance(expr, StructInit):
         struct_name = expr.name
         struct_ty = f"%struct.{struct_name}"
+        field_dict = dict(struct_field_map[struct_name])
+        if getattr(expr, 'stack', False):
+            field_vals = {}
+            for field_name, field_expr in expr.fields:
+                if field_name not in field_dict:
+                    bhumi_report_error(
+                        None, None, f"Field '{field_name}' not in struct '{struct_name}'"
+                    )
+                field_llvm = llvm_ty_of(field_dict[field_name])
+                field_vals[field_name] = (field_llvm, gen_expr(field_expr, out))
+            agg = "undef"
+            for i, (fname, _) in enumerate(struct_field_map[struct_name]):
+                fllvm, fval = field_vals[fname]
+                tmp = new_tmp()
+                out.append(f"  {tmp} = insertvalue {struct_ty} {agg}, {fllvm} {fval}, {i}")
+                agg = tmp
+            return agg
         size_tmp = new_tmp()
         out.append(
             f"  {size_tmp} = ptrtoint {struct_ty}* getelementptr ({struct_ty}, {struct_ty}* null, i32 1) to i64"
@@ -3916,7 +3968,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         out.append(f"  {malloc_tmp} = call i8* @malloc(i64 {size_tmp})")
         tmp_ptr = new_tmp()
         out.append(f"  {tmp_ptr} = bitcast i8* {malloc_tmp} to {struct_ty}*")
-        field_dict = dict(struct_field_map[struct_name])
         for field_name, field_expr in expr.fields:
             if field_name not in field_dict:
                 bhumi_report_error(
@@ -4076,6 +4127,8 @@ def infer_type(expr: Expr) -> str:
             )
         return field_dict[expr.field]
     if isinstance(expr, StructInit):
+        if getattr(expr, 'stack', False):
+            return expr.name
         return expr.name + "*"
     if isinstance(expr, ArrayInit):
         elem_type = None
@@ -4569,6 +4622,9 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 )
             else:
                 src_llvm = llvm_ty_of(infer_type(stmt.expr))
+            if isinstance(stmt.expr, StructInit) and getattr(stmt.expr, 'stack', False):
+                out.append(f"  store {llvm_ty} {val}, {llvm_ty}* %{ir_name}_addr")
+                return
             if llvm_ty.endswith("*") and src_llvm.endswith("*"):
                 if src_llvm != llvm_ty:
                     cast_tmp = new_tmp()
@@ -5878,6 +5934,8 @@ def annotate_types(prog: Program) -> None:
         if isinstance(expr, StructInit):
             for _, fexpr in expr.fields:
                 _ann_expr(fexpr)
+            if getattr(expr, 'stack', False):
+                return _cache(expr, expr.name)
             return _cache(expr, expr.name + "*")
         if isinstance(expr, ArrayInit):
             elem_t = None
@@ -6788,9 +6846,6 @@ done:
 """
     runtime_block_noop = """
 @.alloc_magic = global i64 0
-; --- Lightweight heap-tracking table for noop mode ---
-; Both bhumi_malloc and bhumi_ctbl_insert register pointers here.
-; bhumi_safe_c_free checks before freeing so static string literals are never touched.
 @.nrt_tbl_ptr = global i8** null
 @.nrt_tbl_cap = global i64 0
 @.nrt_tbl_cnt = global i64 0
@@ -6957,7 +7012,6 @@ found:
 not_found:
   ret void
 }
-; --- Runtime stubs ---
 define void @bhumi_signal_handler(i32 %sig) {
 entry:
   ret void
@@ -6978,7 +7032,6 @@ define void @bhumi_vvolatile_abort() {
 entry:
   ret void
 }
-; bhumi_malloc registers every allocation so bhumi_safe_c_free can tell heap from static
 define i8* @bhumi_malloc(i64 %usize) {
 entry:
   %p = call i8* @malloc(i64 %usize)
@@ -7029,7 +7082,6 @@ do_free:
 done:
   ret void
 }
-; bhumi_tbl stubs (no ownership tracking in noop mode)
 define void @bhumi_tbl_insert(i8* %ptr) {
 entry:
   ret void
@@ -7042,7 +7094,6 @@ define i1 @bhumi_tbl_contains(i8* %ptr) {
 entry:
   ret i1 0
 }
-; ctbl routes through the nrt table so C FFI allocations are also tracked
 define void @bhumi_ctbl_insert(i8* %ptr) {
 entry:
   call void @nrt_tbl_insert(i8* %ptr)
@@ -7058,7 +7109,6 @@ entry:
   %r = call i1 @nrt_tbl_contains(i8* %ptr)
   ret i1 %r
 }
-; Only frees if the pointer is in the nrt table — static literals are never touched
 define void @bhumi_safe_c_free(i8* %userptr) nounwind {
 entry:
   %is_null = icmp eq i8* %userptr, null
@@ -8206,6 +8256,9 @@ def check_types(prog: Program):
                     getattr(expr, "col", None),
                     f"Struct '{expr.name}' initializer missing fields {missing}",
                 )
+            if expected is not None and expected == expr.name:
+                expr.stack = True
+                return expr.name
             return expr.name + "*"
         if isinstance(expr, ArrayInit):
             if len(expr.elements) == 0:
@@ -8384,7 +8437,7 @@ def check_types(prog: Program):
                             getattr(stmt, "lineno", None),
                             getattr(stmt, "col", None),
                             f"[Crawl-Checker]-[ERR]: write through alias '{base_var}' is not allowed"
-                            f" — its write permission was revoked by a newer mutable alias."
+                            f", its write permission was revoked by a newer mutable alias."
                             f" Only the most recently granted mutable alias may write.",
                         )
                     rmax, wmax, rc, wc = crumb_map[base_var]
