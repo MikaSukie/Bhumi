@@ -5,6 +5,6 @@ vasync fn ok() except(g) <void> {
 }
 
 fn main() <int> {
-    ok();
+    await ok();
     return 0;
 }
