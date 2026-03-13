@@ -1,0 +1,20 @@
+import C_std;
+
+priv fn main() <void> {
+    int x = 42;
+
+    int *p1 = &x;
+    crumble(p1)!w=1;
+
+    int *p2 = &x;
+    crumble(p2)!r=0!w=1;
+
+    *p1 = 100;
+    *p2 = 200;
+}
+/*
+MUST throw the following error:
+[Crawl-Checker]-[ERR]: write through alias 'p1' is not allowed,
+its write permission was revoked by a newer mutable alias.
+Only the most recently granted mutable alias may write.
+*/
