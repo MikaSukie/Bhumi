@@ -105,8 +105,7 @@ KEYWORDS = {
     "bool",      "char",      "string",    "void",
     "true",      "false",     "null",
     "struct",    "enum",      "match",
-    "async",     "await",     "vasync",    "vawait",
-    "continue",  "break",
+    "async",     "await",     "vasync",    "continue",  "break",
     "nomd",      "pin",       "crumble",
     "nown",
     "take",      "except",
@@ -431,8 +430,6 @@ def ensure_monomorph_call(
             )
         if isinstance(e, AwaitExpr):
             return AwaitExpr(replace_in_expr(e.expr))
-        if isinstance(e, VAwaitExpr):
-            return VAwaitExpr(replace_in_expr(e.expr))
         if isinstance(e, UnaryDeref):
             return UnaryDeref(replace_in_expr(e.ptr))
         if isinstance(e, AddressOf):
@@ -1123,9 +1120,6 @@ class Cast(Expr):
     expr: Expr
 @dataclass
 class AwaitExpr(Expr):
-    expr: Expr
-@dataclass
-class VAwaitExpr(Expr):
     expr: Expr
 @dataclass
 class Func:
@@ -1994,10 +1988,6 @@ class Parser:
             self.bump()
             inner = self.parse_primary()
             return AwaitExpr(inner)
-        if self.peek().kind == "VAWAIT":
-            self.bump()
-            inner = self.parse_primary()
-            return VAwaitExpr(inner)
         if self.peek().kind == "STAR":
             self.bump()
             inner = self.parse_primary()
@@ -2434,12 +2424,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  {cast_tmp} = ptrtoint {src_llvm} {val} to {dst_llvm}")
             return cast_tmp
         bhumi_report_error(None, None, f"Unsupported cast from {src_t} -> {dst_t}")
-    if isinstance(expr, VAwaitExpr):
-        bhumi_report_error(
-            getattr(expr, "lineno", None),
-            getattr(expr, "col", None),
-            "vawait is not yet supported in codegen; use await instead",
-        )
     if isinstance(expr, AwaitExpr):
         inner = expr.expr
         if isinstance(inner, Call):
@@ -2500,15 +2484,17 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"{cont_lbl}:")
             base_fn = _func_name_map.get(call_target)
             ret_llvm = llvm_ty_of(base_fn.ret_type) if base_fn else "i64"
+            _handle_free_tmp = new_tmp()
+            out.append(f"  {_handle_free_tmp} = bitcast {struct_name}* {handle_tmp} to i8*")
+            out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
+            if ret_llvm == "void":
+                return None
             res_ptr = new_tmp()
             out.append(
                 f"  {res_ptr} = getelementptr inbounds {struct_name}, {struct_name}* {handle_tmp}, i32 0, i32 1"
             )
             await_ret = new_tmp()
             out.append(f"  {await_ret} = load {ret_llvm}, {ret_llvm}* {res_ptr}")
-            _handle_free_tmp = new_tmp()
-            out.append(f"  {_handle_free_tmp} = bitcast {struct_name}* {handle_tmp} to i8*")
-            out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
             return await_ret
         else:
             out.append("  ; await of non-call expression is not supported here")
@@ -3568,7 +3554,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             return tmp
         call_target = ensure_monomorph_call(expr, out, expected_ret=expected)
         concrete_fn = _func_name_map.get(call_target)
-        if concrete_fn and concrete_fn.is_async:
+        if concrete_fn and (concrete_fn.is_async or getattr(concrete_fn, "is_vasync", False)):
             bhumi_report_error(
                 None, None, f"async function '{expr.name}' must be awaited"
             )
@@ -5584,7 +5570,7 @@ def gen_func(fn: Func) -> List[str]:
         generated_mono[fn.name] = True
         _restore_outer()
         return [f"declare {ret_ty} @{fn.name}({param_sig})"]
-    if fn.is_async:
+    if fn.is_async or getattr(fn, "is_vasync", False):
         if fn.body is None or len(fn.body) == 0:
             bhumi_report_error(
                 getattr(fn, "lineno", None),
@@ -5724,8 +5710,13 @@ def gen_func(fn: Func) -> List[str]:
     if scope_drop_stack:
         scope_drop_stack.pop()
     if _entry_alloca_buf:
+        _real_insert = entry_insert_pos
+        for _ei in range(len(out) - 1, -1, -1):
+            if out[_ei] == "entry:":
+                _real_insert = _ei + 1
+                break
         for i, line in enumerate(_entry_alloca_buf):
-            out.insert(entry_insert_pos + i, line)
+            out.insert(_real_insert + i, line)
         _entry_alloca_buf.clear()
     scope_drop_stack.extend(_saved_outer_scope_drop)
     crumb_runtime.update(_saved_outer_crumb)
@@ -5833,9 +5824,6 @@ def annotate_types(prog: Program) -> None:
                 if base_fn is not None:
                     _ann_expr(inner)
                     return _cache(expr, base_fn.ret_type)
-            return None
-        if isinstance(expr, VAwaitExpr):
-            _ann_expr(expr.expr)
             return None
         if isinstance(expr, FieldAccess):
             base_t = _ann_expr(expr.base)
@@ -6996,13 +6984,13 @@ entry:
         builtins_emitted = True
     async_defs: List[str] = []
     for fn in prog.funcs:
-        if getattr(fn, "is_async", False):
+        if getattr(fn, "is_async", False) or getattr(fn, "is_vasync", False):
             async_defs.extend(gen_func(fn))
     if async_defs:
         lines.extend(async_defs)
         lines.append("")
     for fn in prog.funcs:
-        if not getattr(fn, "is_async", False):
+        if not getattr(fn, "is_async", False) and not getattr(fn, "is_vasync", False):
             lines += gen_func(fn)
     if string_constants:
         lines.extend(string_constants)
@@ -9055,7 +9043,8 @@ class AsyncStateMachine:
             except Exception:
                 pass
         local_types = [llvm_ty_of(t) for (t, n) in getattr(self, "local_decls", [])]
-        fields = ["i32", ret_ty] + param_types + local_types
+        ret_slot_ty = "i8" if ret_ty == "void" else ret_ty
+        fields = ["i32", ret_slot_ty] + param_types + local_types
         lines.append(f"{st_ty} = type {{ {', '.join(fields)} }}")
         params = ", ".join(f"{llvm_ty_of(t)} %{n}" for t, n in self.func.params)
         lines.append(f"define {st_ty}* @{name}_init({params}) {{")
