@@ -1499,6 +1499,12 @@ class Parser:
                     self.bump()
                     continue
             if tk == "VASYNC":
+                if no_runtime:
+                    bhumi_report_error(
+                        None,
+                        None,
+                        "Cannot use async and/or runtime features with @nrt (No Run Time);",
+                    )
                 is_vasync = True
                 self.bump()
                 continue
@@ -1994,6 +2000,13 @@ class Parser:
                 t.line, t.col, f"Unexpected token while parsing expression: {t.kind}"
             )
         if self.peek().kind == "AWAIT":
+            if no_runtime:
+                t = self.peek()
+                bhumi_report_error(
+                    t.line,
+                    t.col,
+                    "Cannot use async and/or runtime features with @nrt (No Run Time);",
+                )
             self.bump()
             inner = self.parse_primary()
             return AwaitExpr(inner)
