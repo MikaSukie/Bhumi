@@ -8,7 +8,6 @@ fn main() <void> {
     printnl(tostring(charat(slength(sourcefile) , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
     printnl(tostring(charat(slength(sourcefile) + 1 , sourcefile)) + "\n" + tostring(isspace_at(index, sourcefile)));
     newline();
-    // printnl(sourcefile);
 
     printnl("GET MAX LENGTH TEST");
     index = 0;
