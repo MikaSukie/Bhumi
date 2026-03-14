@@ -123,7 +123,7 @@ pub fn greet_person(Person* p) <void> {
 
 pub fn test_generictypesandstructs() <int> {
     Person* p = Person {
-        name(Alice);
+        name("Alice");
         age(30);
     } /*; semi is optional. */
     greet_person(p);
