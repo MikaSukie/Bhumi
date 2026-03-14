@@ -1,0 +1,16 @@
+import CRaylib;
+
+fn main() <int> {
+    InitWindow(int32(800), int32(450), "ray title");
+    SetTargetFPS(int32(60));
+    
+    while (!WindowShouldClose()) {
+        BeginDrawing();
+        ClearBackground(ColorRGBA(uint8(255), uint8(100), uint8(175), uint8(255)));
+
+        DrawText("Welcome to Raylib on Bhumi", int32(80), int32(200), int32(48), int32(0xFF000000));
+        EndDrawing();
+
+    }
+    CloseWindow();
+}
