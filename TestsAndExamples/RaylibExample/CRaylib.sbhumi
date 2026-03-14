@@ -1,0 +1,17 @@
+extern fn InitWindow(int32 width, int32 height, string title) <void>;
+extern fn SetTargetFPS(int32 fps) <void>;
+extern fn WindowShouldClose() <bool>;
+extern fn BeginDrawing() <void>;
+extern fn EndDrawing() <void>;
+extern fn ClearBackground(int32 color) <void>;
+extern fn DrawText(string text, int32 a, int32 b, int32 c, int32 color) <void>;
+extern fn CloseWindow() <void>;
+
+struct Vector2 {
+    float32 x;
+    float32 y;
+}
+
+fn ColorRGBA(uint8 r, uint8 g, uint8 b, uint8 a) <int32> {
+    return (int32(a)<<24) | (int32(b)<<16) | (int32(g)<<8) | int32(r);
+}
