@@ -666,6 +666,56 @@ def emit_cast_value(
     dst_llvm = llvm_ty_of(dst_t)
     if src_llvm == dst_llvm:
         return val
+    if (
+        src_llvm.startswith("%struct.")
+        and not src_llvm.endswith("*")
+        and dst_llvm.startswith("i")
+        and not dst_llvm.endswith("*")
+    ):
+        struct_name = src_llvm[len("%struct."):]
+        fields = struct_field_map.get(struct_name)
+        if fields:
+            field_infos = []
+            total_bits = 0
+            supported = True
+            for idx, (fname, ftyp) in enumerate(fields):
+                fllvm = llvm_ty_of(ftyp)
+                if not fllvm.startswith("i") or fllvm.endswith("*"):
+                    supported = False
+                    break
+                try:
+                    fb = int(fllvm[1:])
+                except Exception:
+                    supported = False
+                    break
+                field_infos.append((idx, fllvm, fb))
+                total_bits += fb
+            try:
+                dst_bits = int(dst_llvm[1:])
+            except Exception:
+                dst_bits = 0
+            if supported and 0 < total_bits <= dst_bits and total_bits <= 64 and dst_bits <= 64:
+                accum = None
+                shift_acc = 0
+                for (idx, fllvm, fb) in field_infos:
+                    fld_tmp = new_tmp()
+                    out.append(f"  {fld_tmp} = extractvalue {src_llvm} {val}, {idx}")
+                    z_tmp = new_tmp()
+                    out.append(f"  {z_tmp} = zext {fllvm} {fld_tmp} to {dst_llvm}")
+                    if shift_acc != 0:
+                        sh_tmp = new_tmp()
+                        out.append(f"  {sh_tmp} = shl {dst_llvm} {z_tmp}, {shift_acc}")
+                        to_or = sh_tmp
+                    else:
+                        to_or = z_tmp
+                    if accum is None:
+                        accum = to_or
+                    else:
+                        or_tmp = new_tmp()
+                        out.append(f"  {or_tmp} = or {dst_llvm} {accum}, {to_or}")
+                        accum = or_tmp
+                    shift_acc += fb
+                return accum
     _src_is_struct_val = src_llvm.startswith("%struct.") and not src_llvm.endswith("*")
     _dst_is_struct_ptr = dst_llvm.startswith("%struct.") and dst_llvm.endswith("*")
     if _src_is_struct_val and _dst_is_struct_ptr:
@@ -687,7 +737,7 @@ def emit_cast_value(
     _dst_is_struct_val = dst_llvm.startswith("%struct.") and not dst_llvm.endswith("*")
     if _src_is_struct_ptr and _dst_is_struct_val:
         src_struct = src_llvm[len("%struct."):-1]
-        dst_struct = dst_llvm[len("%struct."):]
+        dst_struct = dst_llvm[len("%struct."):-1]
         if src_struct == dst_struct:
             bhumi_report_error(
                 None, None,
@@ -740,18 +790,6 @@ def emit_cast_value(
         out.append(f"  {tmp} = icmp ne {src_llvm} {val}, null")
         return tmp
     if (
-        src_llvm.startswith("%struct.")
-        and not src_llvm.endswith("*")
-        and dst_llvm.startswith("i")
-        and not dst_llvm.endswith("*")
-    ):
-        bhumi_report_error(
-            None,
-            None,
-            f"Type mismatch: '{src_t}' to '{dst_t}'. \n"
-            "Pass a matching/change the parameter type.",
-        )
-    if (
         dst_llvm.startswith("%struct.")
         and not dst_llvm.endswith("*")
         and src_llvm.startswith("i")
@@ -763,14 +801,6 @@ def emit_cast_value(
             f"Type mismatch: '{src_t}' to '{dst_t}'. \n"
             "Pass a matching/change the parameter type.",
         )
-    if (
-        src_llvm.endswith("*")
-        and dst_llvm.startswith("i")
-        and not dst_llvm.endswith("*")
-    ):
-        tmp = new_tmp()
-        out.append(f"  {tmp} = ptrtoint {src_llvm} {val} to {dst_llvm}")
-        return tmp
     if (
         dst_llvm.endswith("*")
         and src_llvm.startswith("i")
@@ -3215,6 +3245,23 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             _maybe_flush_deferred(expr.left, lhs)
             _maybe_flush_deferred(expr.right, rhs)
             return tmp
+        if expr.op in {"<<", ">>"}:
+            llvm_ty = llvm_ty_of(lt)
+            rhs_ty = llvm_ty_of(rt)
+            shift_rhs = rhs
+            if rhs_ty != llvm_ty:
+                cast = new_tmp()
+                out.append(f"  {cast} = trunc {rhs_ty} {rhs} to {llvm_ty}")
+                shift_rhs = cast
+            tmp = new_tmp()
+            if expr.op == "<<":
+                op = "shl"
+            else:
+                op = "lshr" if is_unsigned_int_type(lt) else "ashr"
+            out.append(f"  {tmp} = {op} {llvm_ty} {lhs}, {shift_rhs}")
+            _maybe_flush_deferred(expr.left, lhs)
+            _maybe_flush_deferred(expr.right, rhs)
+            return tmp
         common_t = unify_types(lt, rt)
         if common_t is None:
             bhumi_report_error(
@@ -4185,6 +4232,8 @@ def infer_type(expr: Expr) -> str:
     if isinstance(expr, BinOp):
         left_type = infer_type(expr.left)
         right_type = infer_type(expr.right)
+        if expr.op in {"<<", ">>"}:
+            return left_type
         if left_type.endswith("*") and not right_type.endswith("*") and expr.op in {"+", "-"}:
             if expr.op in {"==", "!=", "<", "<=", ">", ">="}:
                 return "bool"
@@ -7502,18 +7551,20 @@ def check_types(prog: Program):
             return "null"
         if isinstance(expr, Cast):
             inner_type = check_expr(expr.expr)
-            if (
-                expr.typ.startswith("int") or expr.typ.startswith("uint")
-            ) and inner_type == "int":
-                return expr.typ
-            if inner_type in {"null", "void*"} and (
-                expr.typ.endswith("*") or expr.typ == "string"
-            ):
+            if inner_type.startswith(("int", "uint")) and expr.typ.startswith(("int", "uint")):
                 return expr.typ
             if inner_type == "float" and expr.typ == "float32":
                 return "float32"
             if inner_type == "float32" and expr.typ == "float":
                 return "float"
+            if inner_type.startswith(("int", "uint")) and expr.typ in {"float", "float32"}:
+                return expr.typ
+            if expr.typ.startswith(("int", "uint")) and inner_type in {"float", "float32"}:
+                return expr.typ
+            if inner_type in {"null", "void*"} and (
+                expr.typ.endswith("*") or expr.typ == "string"
+            ):
+                return expr.typ
             common = unify_types(inner_type, expr.typ)
             if inner_type != expr.typ and (not common or common != expr.typ):
                 bhumi_report_error(
@@ -7582,6 +7633,20 @@ def check_types(prog: Program):
         if isinstance(expr, BinOp):
             left = check_expr(expr.left)
             right = check_expr(expr.right)
+            if expr.op in {"<<", ">>"}:
+                if not left.startswith(("int", "uint")) and left != "int":
+                    bhumi_report_error(
+                        getattr(expr, "lineno", None),
+                        getattr(expr, "col", None),
+                        f"Shift operator requires integer left operand, got {left}",
+                    )
+                if not right.startswith(("int", "uint")) and right != "int":
+                    bhumi_report_error(
+                        getattr(expr, "lineno", None),
+                        getattr(expr, "col", None),
+                        f"Shift amount must be integer, got {right}",
+                    )
+                return left
             if expr.op in {"/", "%"}:
                 cval = eval_const_int(expr.right)
                 if cval is not None and cval == 0:
