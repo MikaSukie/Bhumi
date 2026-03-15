@@ -1,5 +1,5 @@
 #!/bin/bash
 clear
 
-python BDOP.py &&
+./BDOP.bin &&
 time ./main
