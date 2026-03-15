@@ -1,2 +1,3 @@
 source .venv/bin/activate && python -m nuitka --standalone --onefile --lto=yes --clang --jobs=$(nproc) BHUMI.py
   
+source .venv/bin/activate && python -m nuitka --standalone --onefile --lto=yes --clang --jobs=$(nproc) BDOP.py
