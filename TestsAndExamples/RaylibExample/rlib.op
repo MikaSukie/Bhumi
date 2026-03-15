@@ -1,0 +1,10 @@
+link_libs = GL, m, pthread, dl, rt, X11
+extra_clang_flags = -Wno-override-module
+link_paths = ./lib/libraylib.a
+bhumi_sources = main.bhumi
+bhumi_binary = ./BHUMI.bin
+package_name = main
+c_sources = stdlib.c
+optimize = true
+opt_level = O2
+# autorun = true
