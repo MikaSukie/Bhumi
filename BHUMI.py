@@ -2491,6 +2491,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             cast_tmp = new_tmp()
             out.append(f"  {cast_tmp} = sitofp {src_llvm} {val} to double")
             return cast_tmp
+        if src_llvm.startswith("i") and dst_llvm == "float":
+            cast_tmp = new_tmp()
+            out.append(f"  {cast_tmp} = sitofp {src_llvm} {val} to float")
+            return cast_tmp
         if src_llvm == "double" and dst_llvm.startswith("i"):
             cast_tmp = new_tmp()
             out.append(f"  {cast_tmp} = fptosi double {val} to {dst_llvm}")
@@ -2618,8 +2622,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         llvm_ty = llvm_ty_of(ty)
         tmp = new_tmp()
         if expr.op == "-":
-            if llvm_ty == "double" or ty == "float":
-                out.append(f"  {tmp} = fsub double 0.0, {val}")
+            if llvm_ty in ("double", "float"):
+                out.append(f"  {tmp} = fsub {llvm_ty} 0.0, {val}")
             else:
                 out.append(f"  {tmp} = sub {llvm_ty} 0, {val}")
             _maybe_flush_deferred(expr.expr, val)
@@ -3277,15 +3281,18 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             _maybe_flush_deferred(expr.right, rhs)
             return tmp
         common_t = unify_types(lt, rt)
-        if common_t is None or (common_t is not None and llvm_ty_of(common_t).startswith("i")):
-            lhs_llvm = llvm_ty_of(lt)
-            rhs_llvm = llvm_ty_of(rt)
-            if lhs_llvm in ("float", "double") and rhs_llvm.startswith("i"):
-                common_t = lt
-            elif rhs_llvm in ("float", "double") and lhs_llvm.startswith("i"):
-                common_t = rt
-            else:
-                common_t = unify_types(lt, rt)
+        lhs_llvm = llvm_ty_of(lt)
+        rhs_llvm = llvm_ty_of(rt)
+        if lhs_llvm in ("float", "double") and rhs_llvm.startswith("i"):
+            common_t = lt
+        elif rhs_llvm in ("float", "double") and lhs_llvm.startswith("i"):
+            common_t = rt
+        if common_t is None:
+            bhumi_report_error(
+                None,
+                None,
+                f"Cannot unify operand types for '{expr.op}': left={lt}, right={rt}",
+            )
         if common_t is None:
             bhumi_report_error(
                 None,
@@ -6296,6 +6303,12 @@ def compile_program(prog: Program) -> str:
     func_table["strlen"] = "i64"
     func_table["bhumi_argc"] = "i64"
     func_table["bhumi_argv"] = "i8*"
+    func_table["rand"] = "i32"
+    func_table["srand"] = "void"
+    func_table["time"] = "i64"
+    func_table["usleep"] = "i32"
+    func_table["malloc_usable_size"] = "i64"
+    func_table["signal"] = "i8*"
     has_user_main = False
     for fn in prog.funcs:
         if fn.name == "main":
@@ -7545,7 +7558,7 @@ def check_types(prog: Program):
         if isinstance(expr, UnaryOp):
             inner_t = check_expr(expr.expr)
             if expr.op in {"-", "+"}:
-                if inner_t == "float" or inner_t.startswith("int") or inner_t == "int":
+                if inner_t.startswith(("float", "int")):
                     return inner_t
                 bhumi_report_error(
                     getattr(expr, "lineno", None),
@@ -7702,16 +7715,20 @@ def check_types(prog: Program):
                     )
                 return "bool"
             if expr.op == "%":
-                if left == "int" and right == "int":
-                    return "int"
-                elif left == "float" and right == "float":
-                    return "float"
+                if left.startswith(("int", "float")) and right.startswith(("int", "float")):
+                    return unify_types(left, right)
                 else:
                     bhumi_report_error(
                         getattr(expr, "lineno", None),
                         getattr(expr, "col", None),
-                        f"Modulo '%' requires int or float, got {left} and {right}",
+                        f"Modulo '%' requires numeric operands, got {left} and {right}",
                     )
+            if left is None or right is None:
+                bhumi_report_error(
+                    getattr(expr, "lineno", None),
+                    getattr(expr, "col", None),
+                    f"Internal compiler error: unable to determine operand types for '{expr.op}' (left={left}, right={right})",
+                )
             if left.endswith("*") and not right.endswith("*") and expr.op in {"+", "-"}:
                 return left
             if right.endswith("*") and not left.endswith("*") and expr.op == "+":
@@ -8641,7 +8658,10 @@ def check_types(prog: Program):
                 )
             else:
                 expr_type = check_expr(stmt.expr, expected=var_type)
-            if expr_type == "float" and var_type == "float32":
+            if expr_type.startswith("int") and var_type.startswith("float"):
+                stmt.expr = Cast(var_type, stmt.expr)
+                expr_type = var_type
+            elif expr_type == "float" and var_type == "float32":
                 stmt.expr = Cast("float32", stmt.expr)
                 expr_type = "float32"
             elif expr_type == "float32" and var_type == "float":
