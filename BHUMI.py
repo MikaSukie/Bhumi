@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """ [-GPL2.0 license-] """
 import argparse
-import functools
 import os
 import re
 import sys
@@ -664,6 +663,20 @@ def emit_cast_value(
         return None
     src_llvm = llvm_ty_of(src_t)
     dst_llvm = llvm_ty_of(dst_t)
+    if isinstance(val, str) and val.startswith("%"):
+        for line in reversed(out):
+            line = line.strip()
+            if line.startswith(f"{val} ="):
+                parts = line.split()
+                if "to" in parts:
+                    actual = parts[parts.index("to") + 1].rstrip(",")
+                else:
+                    actual = parts[3].rstrip(",")
+                    if actual == dst_llvm:
+                        return val
+                    if actual in ("float", "double", "i1") or actual.startswith("i"):
+                        src_llvm = actual
+                break
     if src_llvm == dst_llvm:
         return val
     if (
@@ -805,15 +818,16 @@ def emit_cast_value(
         dst_llvm.endswith("*")
         and src_llvm.startswith("i")
         and not src_llvm.endswith("*")
+        and not (isinstance(val, str) and val.startswith("%"))
     ):
         tmp = new_tmp()
         out.append(f"  {tmp} = inttoptr {src_llvm} {val} to {dst_llvm}")
         return tmp
     if (
-        src_llvm.startswith("i")
-        and not src_llvm.endswith("*")
-        and dst_llvm.startswith("i")
-        and not dst_llvm.endswith("*")
+            src_llvm.startswith("i")
+            and not src_llvm.endswith("*")
+            and dst_llvm.startswith("i")
+            and not dst_llvm.endswith("*")
     ):
         src_bits = llvm_int_bitsize(src_llvm)
         dst_bits = llvm_int_bitsize(dst_llvm)
@@ -827,21 +841,20 @@ def emit_cast_value(
                 else:
                     out.append(f"  {tmp} = sext {src_llvm} {val} to {dst_llvm}")
             return tmp
-    if src_llvm.startswith("i") and not src_llvm.endswith("*") and dst_llvm == "double":
+    if src_llvm.startswith("i") and not src_llvm.endswith("*") and dst_llvm in ("double", "float"):
         tmp = new_tmp()
-        out.append(f"  {tmp} = sitofp {src_llvm} {val} to double")
+        out.append(f"  {tmp} = sitofp {src_llvm} {val} to {dst_llvm}")
         return tmp
-    if dst_llvm.startswith("i") and not dst_llvm.endswith("*") and src_llvm == "double":
+    if dst_llvm.startswith("i") and not dst_llvm.endswith("*") and (src_llvm == "double" or src_llvm == "float"):
         tmp = new_tmp()
-        out.append(f"  {tmp} = fptosi double {val} to {dst_llvm}")
+        out.append(f"  {tmp} = fptosi {src_llvm} {val} to {dst_llvm}")
         return tmp
-    if src_llvm == "double" and dst_llvm == "float":
+    if (src_llvm == "double" and dst_llvm == "float") or (src_llvm == "float" and dst_llvm == "double"):
         tmp = new_tmp()
-        out.append(f"  {tmp} = fptrunc double {val} to float")
-        return tmp
-    if src_llvm == "float" and dst_llvm == "double":
-        tmp = new_tmp()
-        out.append(f"  {tmp} = fpext float {val} to double")
+        if src_llvm == "double" and dst_llvm == "float":
+            out.append(f"  {tmp} = fptrunc {src_llvm} {val} to {dst_llvm}")
+        else:
+            out.append(f"  {tmp} = fpext {src_llvm} {val} to {dst_llvm}")
         return tmp
     if (
         src_llvm == "i1"
@@ -1257,7 +1270,7 @@ __bhumi_current_codegen_fn: Any = None
 loop_stack: List[Dict[str, str]] = []
 crumb_runtime: Dict[str, Dict[str, Any]] = {}
 owned_vars: set = set()
-scope_drop_stack: List[Dict[str, object]] = []
+scope_drop_stack: List[Dict[str, Any]] = []
 binding_enum_payload: Dict[str, tuple] = {}
 binding_source_name: Dict[str, str] = {}
 _entry_alloca_buf: List[str] = []
@@ -2416,7 +2429,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 return tmp
             if dst_t == "float":
                 tmp = new_tmp()
-                out.append(f"  {tmp} = fadd double 0.0, {inner.value:.8e}")
+                out.append(f"  {tmp} = fadd {dst_llvm} 0.0, {inner.value:.8e}")
                 return tmp
         if isinstance(inner, BoolLit):
             if dst_t == "string":
@@ -2450,7 +2463,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     fval = float(inner.value)
                     tmp = new_tmp()
                     fstr = f"{fval:.8e}"
-                    out.append(f"  {tmp} = fadd double 0.0, {fstr}")
+                    out.append(f"  {tmp} = fadd {dst_llvm} 0.0, {fstr}")
                     return tmp
                 except Exception:
                     bhumi_report_error(
@@ -2956,7 +2969,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
     if isinstance(expr, FloatLit):
         tmp = new_tmp()
         float_val = format_float(expr.value)
-        out.append(f"  {tmp} = fadd double 0.0, {float_val}")
+        llvm_ty = llvm_ty_of(infer_type(expr))
+        out.append(f"  {tmp} = fadd {llvm_ty} 0.0, {float_val}")
         return tmp
     if isinstance(expr, BoolLit):
         tmp = new_tmp()
@@ -3263,6 +3277,15 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             _maybe_flush_deferred(expr.right, rhs)
             return tmp
         common_t = unify_types(lt, rt)
+        if common_t is None or (common_t is not None and llvm_ty_of(common_t).startswith("i")):
+            lhs_llvm = llvm_ty_of(lt)
+            rhs_llvm = llvm_ty_of(rt)
+            if lhs_llvm in ("float", "double") and rhs_llvm.startswith("i"):
+                common_t = lt
+            elif rhs_llvm in ("float", "double") and lhs_llvm.startswith("i"):
+                common_t = rt
+            else:
+                common_t = unify_types(lt, rt)
         if common_t is None:
             bhumi_report_error(
                 None,
@@ -3270,6 +3293,12 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 f"Cannot unify operand types for '{expr.op}': left={lt}, right={rt}",
             )
         llvm_ty = llvm_ty_of(common_t)
+        cast_lhs = emit_cast_value(lhs, lt, common_t, out)
+        if cast_lhs:
+            lhs = cast_lhs
+        cast_rhs = emit_cast_value(rhs, rt, common_t, out)
+        if cast_rhs:
+            rhs = cast_rhs
         tmp = new_tmp()
         if expr.op == "%":
             if llvm_ty in ("double", "float"):
@@ -3784,56 +3813,63 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     ptr_i8 = new_tmp()
                     out.append(f"  {ptr_i8} = bitcast {ptr_llvm} {ptr_val} to i8*")
                 out.append(f"  call void @bhumi_ffi_free(i8* {ptr_i8})")
-                if expr.args and isinstance(expr.args[0], Var):
-                    _fvn = expr.args[0].name
-                    _fsym = symbol_table.lookup(_fvn)
-                    if _fsym is not None:
-                        _fty, _fname = _fsym
-                        _faddr = f"@{_fname}" if _fname.startswith("@") else f"%{_fname}_addr"
-                        out.append(f"  store {_fty} {zero_const_for_llvm(_fty)}, {_fty}* {_faddr}")
-                        _bep = binding_enum_payload.get(_fname)
-                        if _bep is not None:
-                            _bep_enum_ptr, _bep_enum_nm, _bep_vidx, _bep_pty, _bep_slot = _bep
-                            out.append(f"  store {_bep_pty} {zero_const_for_llvm(_bep_pty)}, {_bep_pty}* {_bep_slot}")
-                        if _fvn in crumb_runtime:
-                            crumb_runtime[_fvn]["owned"] = False
-                        owned_vars.discard(_fvn)
-                        for _ctx in scope_drop_stack:
-                            _eirowned = _ctx.get("extra_ir_owned", [])
-                            _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
-                                for _ir_nm, _ir_ty, _ir_src in _eirowned
-                                if _ir_nm != _fname
-                            ]
-                if expr.args and isinstance(expr.args[0], Var):
-                    _cancel_vn = expr.args[0].name
-                    _cancel_cr = crumb_runtime.get(_cancel_vn)
-                    if _cancel_cr:
-                        _cancel_cr.pop("_deferred_frees", None)
+                if isinstance(expr, Call) and expr.args:
+                    _arg0 = expr.args[0]
+                    if isinstance(_arg0, Var):
+                        _fvn = _arg0.name
+                        _fsym = symbol_table.lookup(_fvn)
+                        if _fsym is not None:
+                            _fty, _fname = _fsym
+                            _faddr = f"@{_fname}" if _fname.startswith("@") else f"%{_fname}_addr"
+                            out.append(f"  store {_fty} {zero_const_for_llvm(_fty)}, {_fty}* {_faddr}")
+                            _bep = binding_enum_payload.get(_fname)
+                            if _bep is not None:
+                                _bep_enum_ptr, _bep_enum_nm, _bep_vidx, _bep_pty, _bep_slot = _bep
+                                out.append(f"  store {_bep_pty} {zero_const_for_llvm(_bep_pty)}, {_bep_pty}* {_bep_slot}")
+                            if _fvn in crumb_runtime:
+                                crumb_runtime[_fvn]["owned"] = False
+                            owned_vars.discard(_fvn)
+                            for _ctx in scope_drop_stack:
+                                _eirowned = _ctx.get("extra_ir_owned", [])
+                                _ctx["extra_ir_owned"] = [
+                                    (_ir_nm, _ir_ty, _ir_src)
+                                    for _ir_nm, _ir_ty, _ir_src in _eirowned
+                                    if _ir_nm != _fname
+                                ]
+                if isinstance(expr, Call) and expr.args:
+                    _arg0 = expr.args[0]
+                    if isinstance(_arg0, Var):
+                        _cancel_vn = _arg0.name
+                        _cancel_cr = crumb_runtime.get(_cancel_vn)
+                        if _cancel_cr:
+                            _cancel_cr.pop("_deferred_frees", None)
                 return ""
             if call_target in _FREE_ARG_FUNS and len(arg_vals) >= 1:
-                if expr.args and isinstance(expr.args[0], Var):
-                    _ffvn = expr.args[0].name
-                    _ffsym = symbol_table.lookup(_ffvn)
-                    if _ffsym is not None:
-                        _ffty, _ffname = _ffsym
-                        _ffaddr = _ffname if _ffname.startswith("@") else f"%{_ffname}_addr"
-                        out.append(f"  call void @{call_target}({', '.join(args_ir)})")
-                        out.append(f"  store {_ffty} {zero_const_for_llvm(_ffty)}, {_ffty}* {_ffaddr}")
-                        _bep2 = binding_enum_payload.get(_ffname)
-                        if _bep2 is not None:
-                            _, _, _, _bep2_pty, _bep2_slot = _bep2
-                            out.append(f"  store {_bep2_pty} {zero_const_for_llvm(_bep2_pty)}, {_bep2_pty}* {_bep2_slot}")
-                        if _ffvn in crumb_runtime:
-                            crumb_runtime[_ffvn]["owned"] = False
-                        owned_vars.discard(_ffvn)
-                        for _ctx in scope_drop_stack:
-                            _ctx.get("body_decl_names", set()).discard(_ffvn)
-                            _ctx["extra_ir_owned"] = [
-                                (_ir_nm, _ir_ty, _ir_src)
-                                for _ir_nm, _ir_ty, _ir_src in _ctx.get("extra_ir_owned", [])
-                                if _ir_nm != _ffname
-                            ]
-                        return ""
+                if isinstance(expr, Call) and expr.args:
+                    _arg0 = expr.args[0]
+                    if isinstance(_arg0, Var):
+                        _ffvn = _arg0.name
+                        _ffsym = symbol_table.lookup(_ffvn)
+                        if _ffsym is not None:
+                            _ffty, _ffname = _ffsym
+                            _ffaddr = _ffname if _ffname.startswith("@") else f"%{_ffname}_addr"
+                            out.append(f"  call void @{call_target}({', '.join(args_ir)})")
+                            out.append(f"  store {_ffty} {zero_const_for_llvm(_ffty)}, {_ffty}* {_ffaddr}")
+                            _bep2 = binding_enum_payload.get(_ffname)
+                            if _bep2 is not None:
+                                _, _, _, _bep2_pty, _bep2_slot = _bep2
+                                out.append(f"  store {_bep2_pty} {zero_const_for_llvm(_bep2_pty)}, {_bep2_pty}* {_bep2_slot}")
+                            if _ffvn in crumb_runtime:
+                                crumb_runtime[_ffvn]["owned"] = False
+                            owned_vars.discard(_ffvn)
+                            for _ctx in scope_drop_stack:
+                                _ctx.get("body_decl_names", set()).discard(_ffvn)
+                                _ctx["extra_ir_owned"] = [
+                                    (_ir_nm, _ir_ty, _ir_src)
+                                    for _ir_nm, _ir_ty, _ir_src in _ctx.get("extra_ir_owned", [])
+                                    if _ir_nm != _ffname
+                                ]
+                            return ""
             out.append(f"  call void @{call_target}({', '.join(args_ir)})")
             for arg_expr, arg_val in zip(expr.args, arg_vals):
                 _maybe_flush_deferred(arg_expr, arg_val)
@@ -4243,7 +4279,7 @@ def infer_type(expr: Expr) -> str:
         if (left_type.endswith("*") and right_type.endswith("*")
                 and left_type == right_type and expr.op == "-"):
             return "int"
-        common = unify_int_types(left_type, right_type)
+        common = unify_types(left_type, right_type)
         if not common:
             if left_type != right_type:
                 bhumi_report_error(
@@ -8079,7 +8115,7 @@ def check_types(prog: Program):
                                 _mono_prefix = _mono_base + "__mono__"
                                 if _exp_bare.startswith(_mono_prefix) and _exp_bare in enum_variant_map:
                                     _cvlist = enum_variant_map[_exp_bare]
-                                    _res = [None] * len(_type_params)
+                                    _res: List[Optional[str]] = [None] * len(_type_params)
                                     for _ov, (_, _cp) in zip(_orig_edef.variants, _cvlist):
                                         if _ov.typ is not None and _cp is not None:
                                             for _i, _tp in enumerate(_type_params):
@@ -8589,7 +8625,7 @@ def check_types(prog: Program):
                 ):
                     expr_type = "string"
                 else:
-                    common = unify_int_types(left_type, right_type)
+                    common = unify_types(left_type, right_type)
                     if not common:
                         if left_type != right_type:
                             bhumi_report_error(
