@@ -318,7 +318,7 @@ pub fn test_async() <int> {
 
 // cast testing
 pub fn test_cast() <int> {
-    print(typeof(int8(0)));
+    print(typeof((int8) 0));
     newline();
     return 0;
 }
