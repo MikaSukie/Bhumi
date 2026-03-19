@@ -84,12 +84,6 @@ TYPE_TOKENS = {
     "UINT",    "UINT8",  "UINT16", "UINT32", "UINT64",
     "HASH",
 }
-CAST_TYPE_TOKENS = {
-    "INT",     "INT8",   "INT16",  "INT32",  "INT64",
-    "FLOAT",   "FLOAT32",
-    "STRING",  "CHAR",   "BOOL",   "VOID",
-    "UINT",    "UINT8",  "UINT16", "UINT32", "UINT64",
-}
 @dataclass
 class Token:
     kind: str
@@ -104,7 +98,7 @@ KEYWORDS = {
     "float",     "float32",
     "bool",      "char",      "string",    "void",
     "true",      "false",     "null",
-    "struct",    "enum",      "match",
+    "struct",    "enum",      "match",     "packed",
     "async",     "await",     "vasync",    "continue",  "break",
     "nomd",      "pin",       "crumble",
     "nown",
@@ -1157,6 +1151,7 @@ class IndexAssign(Stmt):
 class StructDef(Stmt):
     name: str
     fields: List[StructField]
+    packed: bool = False
 @dataclass
 class FieldAccess(Expr):
     base: Expr
@@ -1432,6 +1427,8 @@ class Parser:
                 )
             elif self.peek().kind == "STRUCT":
                 structs.append(self.parse_struct_def())
+            elif self.peek().kind == "PACKED":
+                structs.append(self.parse_struct_def())
             elif self.peek().kind == "ENUM":
                 enums.append(self.parse_enum_def())
             else:
@@ -1528,6 +1525,10 @@ class Parser:
         self.expect("RBRACE")
         return EnumDef(name, type_params, variants)
     def parse_struct_def(self) -> StructDef:
+        packed = False
+        if self.peek().kind == "PACKED":
+            packed = True
+            self.bump()
         self.expect("STRUCT")
         ident_tok = self.expect("IDENT")
         name = ident_tok.value
@@ -1569,7 +1570,7 @@ class Parser:
             self.expect("SEMI")
             fields.append(StructField(fname, typ))
         self.expect("RBRACE")
-        return StructDef(name, fields)
+        return StructDef(name, fields, packed=packed)
     def parse_func(self) -> Func:
         access = "pub"
         is_extern = False
@@ -1782,9 +1783,7 @@ class Parser:
             and self.tokens[self.pos + 1].kind == "LPAREN"
         ):
             return self.parse_forget()
-        if (t.kind in CAST_TYPE_TOKENS or t.kind == "IDENT") and self.tokens[
-            self.pos + 1
-        ].kind == "LPAREN":
+        if t.kind == "IDENT" and self.tokens[self.pos + 1].kind == "LPAREN":
             return self.parse_expr_stmt()
         if (
             t.kind in {"PUB", "PRIV", "PROT", "NOMD"}
@@ -2155,16 +2154,6 @@ class Parser:
                 arg_expr = self.parse_expr()
                 self.expect("RPAREN")
                 return TypeofExpr(arg_expr)
-            if (
-                t.kind in TYPE_TOKENS
-                and t.kind != "IDENT"
-                and self.peek().kind == "LPAREN"
-            ):
-                type_name = t.value
-                self.expect("LPAREN")
-                inner = self.parse_expr()
-                self.expect("RPAREN")
-                return Cast(type_name, inner)
             if t.kind == "INT" and re.match(r"^[0-9]", t.value):
                 try:
                     return IntLit(int(t.value, 0))
@@ -2172,9 +2161,9 @@ class Parser:
                     bhumi_report_error(
                         t.line, t.col, f"Invalid integer literal: {t.value}"
                     )
-            if t.kind == "FLOAT":
+            if t.kind == "FLOAT" and re.match(r"^[0-9]", t.value):
                 return FloatLit(float(t.value), bits=64)
-            if t.kind == "FLOAT32":
+            if t.kind == "FLOAT32" and re.match(r"^[0-9]", t.value):
                 return FloatLit(float(t.value), bits=32)
             if t.kind == "STRING":
                 return StrLit(t.value)
@@ -2187,6 +2176,35 @@ class Parser:
             if t.kind == "NULL":
                 return NullLit()
             if t.kind == "LPAREN":
+                saved_pos = self.pos
+                _cast_type_name: Optional[str] = None
+                if self.peek().kind in TYPE_TOKENS and self.peek().kind != "IDENT":
+                    _type_tok_c = self.bump()
+                    _tname_c = _type_tok_c.value
+                    while self.peek().kind == "STAR":
+                        _tname_c += "*"
+                        self.bump()
+                    if self.peek().kind == "RPAREN":
+                        self.bump()
+                        _cast_type_name = _tname_c
+                    else:
+                        self.pos = saved_pos
+                elif self.peek().kind == "IDENT":
+                    _type_tok_c = self.bump()
+                    _tname_c = _type_tok_c.value
+                    _has_ptr_c = False
+                    while self.peek().kind == "STAR":
+                        _tname_c += "*"
+                        self.bump()
+                        _has_ptr_c = True
+                    if _has_ptr_c and self.peek().kind == "RPAREN":
+                        self.bump()
+                        _cast_type_name = _tname_c
+                    else:
+                        self.pos = saved_pos
+                if _cast_type_name is not None:
+                    _inner_cast = self.parse_primary()
+                    return Cast(_cast_type_name, _inner_cast)
                 expr = self.parse_expr()
                 self.expect("RPAREN")
                 return expr
@@ -2235,6 +2253,12 @@ class Parser:
                 return base
             if t.kind == "HASH":
                 return CallerType()
+            if t.kind in TYPE_TOKENS and t.kind != "IDENT":
+                bhumi_report_error(
+                    t.line, t.col,
+                    f"Type name '{t.value}' cannot appear in an expression. "
+                    f"To cast, use: ({t.value})expr"
+                )
             bhumi_report_error(t.line, t.col, f"Unexpected token: {t.kind}")
         expr: Expr = parse_atom()
         while self.peek().kind == "DOT":
@@ -2276,6 +2300,31 @@ def unify_types(t1: str, t2: str) -> Optional[str]:
     if int_common := unify_int_types(t1, t2):
         return int_common
     return None
+def _c_promote_types(t1: str, t2: str) -> str:
+    if t1 == t2:
+        return t1
+    float_rank = {"float": 2, "float32": 1}
+    r1 = float_rank.get(t1, 0)
+    r2 = float_rank.get(t2, 0)
+    if r1 > 0 or r2 > 0:
+        if r1 >= r2:
+            return t1
+        return t2
+    if t1.endswith("*") and not t2.endswith("*"):
+        return t1
+    if t2.endswith("*") and not t1.endswith("*"):
+        return t2
+    try:
+        b1, u1 = int_type_info(t1)
+        b2, u2 = int_type_info(t2)
+        bits = max(b1, b2)
+        unsigned = u1 or u2
+        if bits == 64:
+            return "uint" if unsigned else "int"
+        return f"uint{bits}" if unsigned else f"int{bits}"
+    except Exception:
+        pass
+    return t1
 type_map = {
     "int": "i64", "int8": "i8", "int16": "i16", "int32": "i32",
     "void": "void", "int64": "i64", "float": "double", "bool": "i1",
@@ -2286,6 +2335,37 @@ type_map = {
 struct_llvm_defs: List[str] = []
 symbol_table = SymbolTable()
 func_table: Dict[str, str] = {}
+_BUILTIN_FUNC_RETURN_TYPES: Dict[str, str] = {
+    "exit":                          "void",
+    "malloc":                        "void*",
+    "free":                          "void",
+    "bhumi_free":                    "void",
+    "bhumi_c_free":                  "void",
+    "bhumi_safe_c_free":             "void",
+    "bhumi_tbl_insert":              "void",
+    "bhumi_tbl_remove":              "void",
+    "bhumi_tbl_contains":            "bool",
+    "bhumi_ctbl_insert":             "void",
+    "bhumi_ctbl_remove":             "void",
+    "bhumi_ctbl_contains":           "bool",
+    "bhumi_null_abort":              "void",
+    "bhumi_oob_abort":               "void",
+    "bhumi_init_runtime":            "void",
+    "bhumi_register_async":          "void",
+    "bhumi_block_until_complete":    "void",
+    "bhumi_alloc_size":              "int",
+    "bhumi_argc":                    "int",
+    "bhumi_argv":                    "string",
+    "puts":                          "int32",
+    "strlen":                        "int",
+    "time":                          "int",
+    "srand":                         "void",
+    "rand":                          "int32",
+    "usleep":                        "int32",
+    "malloc_usable_size":            "int",
+    "signal":                        "void*",
+    "llvm.memcpy.p0i8.p0i8.i64":    "void",
+}
 def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str | None:
     if isinstance(expr, CallerType):
         bhumi_report_error(
@@ -2539,7 +2619,45 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             cast_tmp = new_tmp()
             out.append(f"  {cast_tmp} = ptrtoint {src_llvm} {val} to {dst_llvm}")
             return cast_tmp
-        bhumi_report_error(None, None, f"Unsupported cast from {src_t} -> {dst_t}")
+        def _llvm_bitwidth(ty: str) -> Optional[int]:
+            if ty.endswith("*"):
+                return 64
+            m = re.fullmatch(r"i(\d+)", ty)
+            if m:
+                return int(m.group(1))
+            if ty == "double":
+                return 64
+            if ty == "float":
+                return 32
+            return None
+        src_bw = _llvm_bitwidth(src_llvm)
+        dst_bw = _llvm_bitwidth(dst_llvm)
+        if src_bw and dst_bw and src_bw == dst_bw:
+            cast_tmp = new_tmp()
+            out.append(f"  {cast_tmp} = bitcast {src_llvm} {val} to {dst_llvm}")
+            return cast_tmp
+        if not src_llvm.endswith("*") and dst_llvm.endswith("*"):
+            tmp_i64 = new_tmp()
+            out.append(f"  {tmp_i64} = zext {src_llvm} {val} to i64")
+            cast_tmp = new_tmp()
+            out.append(f"  {cast_tmp} = inttoptr i64 {tmp_i64} to {dst_llvm}")
+            return cast_tmp
+        if src_bw and dst_bw:
+            cast_tmp = new_tmp()
+            out.append(f"  {cast_tmp} = bitcast {src_llvm} {val} to {dst_llvm}")
+            return cast_tmp
+        relay = new_tmp()
+        out.append(f"  {relay} = bitcast {src_llvm} {val} to i8*")
+        if dst_llvm.endswith("*"):
+            cast_tmp = new_tmp()
+            out.append(f"  {cast_tmp} = bitcast i8* {relay} to {dst_llvm}")
+            return cast_tmp
+        if dst_llvm.startswith("i"):
+            cast_tmp = new_tmp()
+            out.append(f"  {cast_tmp} = ptrtoint i8* {relay} to {dst_llvm}")
+            return cast_tmp
+        out.append(f"  ; NOTE: cast from {src_t} to {dst_t} not lowered, passing value as-is")
+        return val
     if isinstance(expr, AwaitExpr):
         inner = expr.expr
         if isinstance(inner, Call):
@@ -3178,8 +3296,9 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         return tmp
     if isinstance(expr, BinOp):
         lhs = gen_expr(expr.left, out)
+        lt = infer_type(expr.left)
         rhs = gen_expr(expr.right, out)
-        ty = infer_type(expr.left)
+        ty = lt
         if ty == "string" and expr.op == "+":
             len_l = new_tmp()
             out.append(f"  {len_l} = call i64 @strlen(i8* {lhs})")
@@ -3213,7 +3332,6 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             _emit_free_if_temp(expr.left, lhs)
             _emit_free_if_temp(expr.right, rhs)
             return raw
-        lt = infer_type(expr.left)
         rt = infer_type(expr.right)
         def _ptr_arith_offset(offset_val: str, offset_type: str) -> str:
             off_llvm = llvm_ty_of(offset_type)
@@ -3288,17 +3406,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         elif rhs_llvm in ("float", "double") and lhs_llvm.startswith("i"):
             common_t = rt
         if common_t is None:
-            bhumi_report_error(
-                None,
-                None,
-                f"Cannot unify operand types for '{expr.op}': left={lt}, right={rt}",
-            )
-        if common_t is None:
-            bhumi_report_error(
-                None,
-                None,
-                f"Cannot unify operand types for '{expr.op}': left={lt}, right={rt}",
-            )
+            common_t = _c_promote_types(lt, rt)
         llvm_ty = llvm_ty_of(common_t)
         cast_lhs = emit_cast_value(lhs, lt, common_t, out)
         if cast_lhs:
@@ -4288,13 +4396,7 @@ def infer_type(expr: Expr) -> str:
             return "int"
         common = unify_types(left_type, right_type)
         if not common:
-            if left_type != right_type:
-                bhumi_report_error(
-                    getattr(expr, "lineno", None),
-                    getattr(expr, "col", None),
-                    f"Type mismatch in binary op '{expr.op}': {left_type} vs {right_type}",
-                )
-            common = left_type
+            common = _c_promote_types(left_type, right_type)
         if expr.op in {"==", "!=", "<", "<=", ">", ">="}:
             return "bool"
         return common
@@ -4977,6 +5079,11 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"  call void @bhumi_safe_c_free(i8* {_old_cast})")
                 out.append(f"  br label %{_drop_old_skip}")
                 out.append(f"{_drop_old_skip}:")
+            _expr_llvm_ty = llvm_ty_of(infer_type(stmt.expr))
+            if _expr_llvm_ty != llvm_ty and val is not None:
+                _coerced = emit_cast_value(val, infer_type(stmt.expr), llvm_to_lang(llvm_ty), out)
+                if _coerced is not None:
+                    val = _coerced
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {addr_token}")
             if isinstance(stmt.expr, Call):
                 ret_t = _stmt_expr_ty
@@ -6006,7 +6113,7 @@ def annotate_types(prog: Program) -> None:
                 return _cache(expr, "bool")
             common = unify_int_types(left_t, right_t) or (left_t if left_t == right_t else None)
             if common is None:
-                return None
+                common = _c_promote_types(left_t, right_t)
             return _cache(expr, common)
         if isinstance(expr, Ternary):
             _ann_expr(expr.cond, "bool")
@@ -7270,11 +7377,16 @@ entry:
         field_tys: List[str] = []
         struct_field_map[sdef.name] = [(f.name, f.typ) for f in sdef.fields]
         for fld in sdef.fields:
-            if fld.typ in type_map:
-                field_tys.append(type_map[fld.typ])
-            else:
-                field_tys.append(f"%struct.{fld.typ}")
-        llvm_line = f"%struct.{sdef.name} = type {{ {', '.join(field_tys)} }}"
+            fllvm = llvm_ty_of(fld.typ)
+            if getattr(sdef, 'packed', False) and fllvm.startswith("[") and fllvm.endswith("]*"):
+                inner = fllvm[:-1]
+                elem = inner.split(" x ", 1)[1].rstrip("]") if " x " in inner else "i8"
+                fllvm = elem + "*"
+            field_tys.append(fllvm)
+        if getattr(sdef, 'packed', False):
+            llvm_line = f"%struct.{sdef.name} = type <{{ {', '.join(field_tys)} }}>"
+        else:
+            llvm_line = f"%struct.{sdef.name} = type {{ {', '.join(field_tys)} }}"
         struct_llvm_defs.append(llvm_line)
     if struct_llvm_defs:
         lines.extend(struct_llvm_defs)
@@ -7599,28 +7711,7 @@ def check_types(prog: Program):
         if isinstance(expr, NullLit):
             return "null"
         if isinstance(expr, Cast):
-            inner_type = check_expr(expr.expr)
-            if inner_type.startswith(("int", "uint")) and expr.typ.startswith(("int", "uint")):
-                return expr.typ
-            if inner_type == "float" and expr.typ == "float32":
-                return "float32"
-            if inner_type == "float32" and expr.typ == "float":
-                return "float"
-            if inner_type.startswith(("int", "uint")) and expr.typ in {"float", "float32"}:
-                return expr.typ
-            if expr.typ.startswith(("int", "uint")) and inner_type in {"float", "float32"}:
-                return expr.typ
-            if inner_type in {"null", "void*"} and (
-                expr.typ.endswith("*") or expr.typ == "string"
-            ):
-                return expr.typ
-            common = unify_types(inner_type, expr.typ)
-            if inner_type != expr.typ and (not common or common != expr.typ):
-                bhumi_report_error(
-                    getattr(expr, "lineno", None),
-                    getattr(expr, "col", None),
-                    f"Cannot cast {inner_type} to {expr.typ}",
-                )
+            check_expr(expr.expr)
             return expr.typ
         if isinstance(expr, AddressOf):
             if isinstance(expr.expr, Var):
@@ -7715,8 +7806,9 @@ def check_types(prog: Program):
                     )
                 return "bool"
             if expr.op == "%":
-                if left.startswith(("int", "float")) and right.startswith(("int", "float")):
-                    return unify_types(left, right)
+                if (left.startswith(("int", "uint", "float")) or left in ("char", "bool")) and \
+                   (right.startswith(("int", "uint", "float")) or right in ("char", "bool")):
+                    return unify_types(left, right) or _c_promote_types(left, right)
                 else:
                     bhumi_report_error(
                         getattr(expr, "lineno", None),
@@ -7737,11 +7829,7 @@ def check_types(prog: Program):
                 return "int"
             common = unify_types(left, right)
             if not common:
-                bhumi_report_error(
-                    getattr(expr, "lineno", None),
-                    getattr(expr, "col", None),
-                    f"Type mismatch: {left} {expr.op} {right}",
-                )
+                common = _c_promote_types(left, right)
             if expr.op in {"==", "!=", "<", ">", "<=", ">="}:
                 return "bool"
             return common
@@ -8214,6 +8302,19 @@ def check_types(prog: Program):
                     return enum_name
             fn = funcs.get(expr.name)
             if fn is None:
+                _builtin_ret = _BUILTIN_FUNC_RETURN_TYPES.get(expr.name)
+                if _builtin_ret is not None:
+                    return _builtin_ret
+                _ft_ret = func_table.get(expr.name)
+                if _ft_ret is not None:
+                    for _k, _v in type_map.items():
+                        if _v == _ft_ret:
+                            return _k
+                    if _ft_ret == "void":
+                        return "void"
+                    if _ft_ret.startswith("%struct."):
+                        return _ft_ret[8:] + "*"
+                    return _ft_ret
                 bhumi_report_error(
                     getattr(expr, "lineno", None),
                     getattr(expr, "col", None),
@@ -8260,11 +8361,32 @@ def check_types(prog: Program):
                         env.declare(actual_type, expected_concrete)
                         actual_type = expected_concrete
                 common = unify_int_types(actual_type, expected_concrete)
-                if (
-                    expected_concrete != "void"
-                    and actual_type != expected_concrete
-                    and (not common or common != expected_concrete)
-                ):
+                def _c_coerce_ok(act: str, exp: str) -> bool:
+                    if act == exp or exp == "void":
+                        return True
+                    if unify_types(act, exp) is not None:
+                        return True
+                    if common and common == exp:
+                        return True
+                    _num = {"int","uint","float","float32","bool","char",
+                            "int8","int16","int32","int64",
+                            "uint8","uint16","uint32","uint64"}
+                    act_num = act in _num or act.startswith(("int","uint","float"))
+                    exp_num = exp in _num or exp.startswith(("int","uint","float"))
+                    if act_num and exp_num:
+                        return True
+                    if act.endswith("*") and exp.endswith("*"):
+                        return True
+                    if act in ("null", "void*") and exp.endswith("*"):
+                        return True
+                    if exp in ("null", "void*") and act.endswith("*"):
+                        return True
+                    if act.endswith("*") and (exp_num or exp.startswith(("int","uint"))):
+                        return True
+                    if exp.endswith("*") and (act_num or act.startswith(("int","uint"))):
+                        return True
+                    return False
+                if not _c_coerce_ok(actual_type, expected_concrete):
                     bhumi_report_error(
                         getattr(expr, "lineno", None),
                         getattr(expr, "col", None),
@@ -8385,11 +8507,19 @@ def check_types(prog: Program):
                 declared_type = match_list[0]
                 actual_type = check_expr(fexpr, expected=declared_type)
                 if actual_type != declared_type:
-                    bhumi_report_error(
-                        getattr(fexpr, "lineno", None),
-                        getattr(fexpr, "col", None),
-                        f"Struct '{expr.name}' field '{fname}': expected '{declared_type}', got '{actual_type}'",
-                    )
+                    _num_types = {"int","uint","float","float32","bool","char",
+                                  "int8","int16","int32","int64",
+                                  "uint8","uint16","uint32","uint64"}
+                    _act_num = actual_type in _num_types or actual_type.startswith(("int","uint","float"))
+                    _dec_num = declared_type in _num_types or declared_type.startswith(("int","uint","float"))
+                    _ptr_ok  = actual_type.endswith("*") and declared_type.endswith("*")
+                    _null_ok = actual_type in ("null","void*") and declared_type.endswith("*")
+                    if not (_act_num and _dec_num) and not _ptr_ok and not _null_ok:
+                        bhumi_report_error(
+                            getattr(fexpr, "lineno", None),
+                            getattr(fexpr, "col", None),
+                            f"Struct '{expr.name}' field '{fname}': expected '{declared_type}', got '{actual_type}'",
+                        )
                 seen_fields.add(fname)
             all_field_names = {fn for (fn, _) in expected_fields}
             if seen_fields != all_field_names:
@@ -8500,11 +8630,19 @@ def check_types(prog: Program):
                     return False
                 if expr_type != raw_typ and (not common or common != raw_typ):
                     if not (_generic_matches_mono(raw_typ, expr_type) or _generic_matches_mono(expr_type, raw_typ)):
-                        bhumi_report_error(
-                            getattr(stmt, "lineno", None),
-                            getattr(stmt, "col", None),
-                            f"Type mismatch in variable init '{stmt.name}': expected {raw_typ}, got {expr_type}",
-                        )
+                        _num_types = {"int","uint","float","float32","bool","char",
+                                      "int8","int16","int32","int64",
+                                      "uint8","uint16","uint32","uint64"}
+                        _act_num = expr_type in _num_types or expr_type.startswith(("int","uint","float"))
+                        _dec_num = raw_typ   in _num_types or raw_typ.startswith(("int","uint","float"))
+                        _ptr_ok  = expr_type.endswith("*") and raw_typ.endswith("*")
+                        _null_ok = expr_type in ("null","void*") and raw_typ.endswith("*")
+                        if not (_act_num and _dec_num) and not _ptr_ok and not _null_ok:
+                            bhumi_report_error(
+                                getattr(stmt, "lineno", None),
+                                getattr(stmt, "col", None),
+                                f"Type mismatch in variable init '{stmt.name}': expected {raw_typ}, got {expr_type}",
+                            )
             return
         if isinstance(stmt, ContinueStmt) or isinstance(stmt, BreakStmt):
             return
@@ -8633,8 +8771,8 @@ def check_types(prog: Program):
                 and isinstance(stmt.expr.left, Var)
                 and stmt.expr.left.name == stmt.name
             ):
-                right_type = check_expr(stmt.expr.right)
                 left_type = var_type
+                right_type = check_expr(stmt.expr.right, expected=left_type)
                 if (
                     stmt.expr.op == "+"
                     and left_type == "string"
@@ -8644,13 +8782,7 @@ def check_types(prog: Program):
                 else:
                     common = unify_types(left_type, right_type)
                     if not common:
-                        if left_type != right_type:
-                            bhumi_report_error(
-                                getattr(stmt, "lineno", None),
-                                getattr(stmt, "col", None),
-                                f"Type mismatch in compound assignment '{stmt.expr.op}': {left_type} vs {right_type}",
-                            )
-                        common = left_type
+                        common = _c_promote_types(left_type, right_type)
                     expr_type = common
                 _inc_read(
                     stmt.name,
@@ -8668,11 +8800,19 @@ def check_types(prog: Program):
                 stmt.expr = Cast("float", stmt.expr)
                 expr_type = "float"
             if expr_type != var_type:
-                bhumi_report_error(
-                    getattr(stmt, "lineno", None),
-                    getattr(stmt, "col", None),
-                    f"Assign type mismatch: {var_type} = {expr_type}",
-                )
+                _num_types = {"int","uint","float","float32","bool","char",
+                              "int8","int16","int32","int64",
+                              "uint8","uint16","uint32","uint64"}
+                _act_num = expr_type in _num_types or expr_type.startswith(("int","uint","float"))
+                _var_num = var_type   in _num_types or var_type.startswith(("int","uint","float"))
+                _ptr_ok  = expr_type.endswith("*") and var_type.endswith("*")
+                _null_ok = expr_type in ("null","void*") and var_type.endswith("*")
+                if not (_act_num and _var_num) and not _ptr_ok and not _null_ok:
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Assign type mismatch: {var_type} = {expr_type}",
+                    )
             if func is not None and getattr(func, "is_vasync", False):
                 cap = getattr(func, "_vasync_captured", set()) or set()
                 exc = set(getattr(func, "vasync_except", []) or [])
@@ -8923,11 +9063,21 @@ def check_types(prog: Program):
                     return gm is not None
                 if actual != expected_ret and (not common or common != expected_ret):
                     if not _is_mono_of(actual, expected_ret) and not _is_mono_of(actual.rstrip("*"), expected_ret.rstrip("*")):
-                        bhumi_report_error(
-                            getattr(stmt, "lineno", None),
-                            getattr(stmt, "col", None),
-                            f"Return type mismatch: expected {expected_ret}, got {actual}",
-                        )
+                        _num_types = {"int","uint","float","float32","bool","char",
+                                      "int8","int16","int32","int64",
+                                      "uint8","uint16","uint32","uint64"}
+                        _act_num  = actual      in _num_types or actual.startswith(("int","uint","float"))
+                        _exp_num  = expected_ret in _num_types or expected_ret.startswith(("int","uint","float"))
+                        _ptr_ok   = (actual.endswith("*") and expected_ret.endswith("*"))
+                        _null_ok  = (actual in ("null","void*") and expected_ret.endswith("*"))
+                        _void_ptr = (actual.endswith("*") and expected_ret == "void*") or \
+                                    (expected_ret.endswith("*") and actual == "void*")
+                        if not (_act_num and _exp_num) and not _ptr_ok and not _null_ok and not _void_ptr:
+                            bhumi_report_error(
+                                getattr(stmt, "lineno", None),
+                                getattr(stmt, "col", None),
+                                f"Return type mismatch: expected {expected_ret}, got {actual}",
+                            )
             else:
                 if not (
                     func is not None
@@ -9750,6 +9900,16 @@ def main():
         "bhumi_tbl_contains": "i1",
         "puts": "i32", "strlen": "i64",
         "bhumi_argc": "i64", "bhumi_argv": "i8*",
+        "time": "i64", "srand": "void", "rand": "i32", "usleep": "i32",
+        "bhumi_alloc_size": "i64", "bhumi_free": "void",
+        "bhumi_safe_c_free": "void",
+        "bhumi_null_abort": "void", "bhumi_oob_abort": "void",
+        "bhumi_init_runtime": "void",
+        "bhumi_ctbl_insert": "void", "bhumi_ctbl_remove": "void",
+        "bhumi_ctbl_contains": "i1",
+        "bhumi_register_async": "void",
+        "bhumi_block_until_complete": "void",
+        "signal": "i8*",
     })
     annotate_types(final_prog)
     llvm = compile_program(final_prog)
