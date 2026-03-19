@@ -1,17 +1,30 @@
-extern fn InitWindow(int32 width, int32 height, string title) <void>;
-extern fn SetTargetFPS(int32 fps) <void>;
-extern fn WindowShouldClose() <bool>;
-extern fn BeginDrawing() <void>;
-extern fn EndDrawing() <void>;
-extern fn ClearBackground(int32 color) <void>;
-extern fn DrawText(string text, int32 a, int32 b, int32 c, int32 color) <void>;
-extern fn CloseWindow() <void>;
+pub extern fn InitWindow(int32 width, int32 height, string title) <void>;
+pub extern fn SetTargetFPS(int32 fps) <void>;
+pub extern fn WindowShouldClose() <bool>;
+pub extern fn BeginDrawing() <void>;
+pub extern fn EndDrawing() <void>;
+pub extern fn ClearBackground(int32 color) <void>;
+pub extern fn DrawText(string text, int32 x, int32 y, int32 font_size, int32 color) <void>;
+pub extern fn CloseWindow() <void>;
+pub extern fn GetMonitorRefreshRate(int32 monitor) <int32>;
+pub extern fn DrawRectangle(int32 x, int32 y, int32 width, int32 height, int32 color) <void>;
+pub extern fn GetFrameTime() <float32>;
+pub extern fn LoadTexture(string filename) <Texture>;
+pub extern fn DrawTexture(Texture texture, int32 pos_x, int32 pos_y, int32 tint) <void>;
 
 struct Vector2 {
     float32 x;
     float32 y;
 }
 
+struct Texture {
+    uint32 id;
+    int32 width;
+    int32 height;
+    int32 mipmaps;
+    int32 format;
+}
+
 fn ColorRGBA(uint8 r, uint8 g, uint8 b, uint8 a) <int32> {
-    return (int32(a)<<24) | (int32(b)<<16) | (int32(g)<<8) | int32(r);
+    return ((int32) a <<24) | ((int32) b <<16) | ((int32) g <<8) | (int32) r;
 }
