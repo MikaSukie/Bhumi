@@ -1,16 +1,67 @@
-import CRaylib;
+import CRaylib, C_std;
 
 fn main() <int> {
-    InitWindow(int32(800), int32(450), "ray title");
-    SetTargetFPS(int32(60));
-    
-    while (!WindowShouldClose()) {
+    float32 pos_x = 0.0;
+    float32 pos_y = 0.0;
+
+    float32 vel_x = 197.0;
+    float32 vel_y = 151.0;
+
+    int32 rect_size = (int32) 100;
+    int32 screen_width = (int32) 800;
+    int32 screen_height = (int32) 450;
+
+    uint8 r = 150;
+    uint8 g = 255;
+    uint8 b = 128;
+
+    InitWindow(screen_width, screen_height, "Colorful DVD");
+    SetTargetFPS((int32) 60);
+
+    while(!WindowShouldClose()) {
+        float32 dt = GetFrameTime();
+
+        pos_x += vel_x * dt;
+        pos_y += vel_y * dt;
+
+        if (pos_x <= 0.0) {
+            pos_x = 0.0;
+            vel_x = -vel_x;
+
+            r += 47;
+            g += 83;
+            b += 29;
+        } else if (pos_x + (float32) rect_size >= (float32) screen_width) {
+            pos_x = (float32) screen_width - rect_size;
+            vel_x = -vel_x;
+
+            r += 47;
+            g += 83;
+            b += 29;
+        }
+
+        if (pos_y <= 0.0) {
+            pos_y = 0.0;
+            vel_y = -vel_y;
+
+            r += 47;
+            g += 83;
+            b += 29;
+        } else if (pos_y + (float32) rect_size >= (float32) screen_height) {
+            pos_y = (float32) screen_height - rect_size;
+            vel_y = -vel_y;
+
+            r += 47;
+            g += 83;
+            b += 29;
+        }
+
         BeginDrawing();
-        ClearBackground(ColorRGBA(uint8(255), uint8(100), uint8(175), uint8(255)));
-
-        DrawText("Welcome to Raylib on Bhumi", int32(80), int32(200), int32(48), int32(0xFF000000));
+        ClearBackground(ColorRGBA(50, 50, 50, 255));
+        DrawText("Welcome to DVD on Bhumi", 80, 200, 48, (int32) 0xFF000000);
+        DrawRectangle(ftoint(pos_x), ftoint(pos_y), rect_size, rect_size, ColorRGBA(r, g, b, 255));
         EndDrawing();
-
     }
+
     CloseWindow();
 }
