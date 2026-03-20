@@ -4873,6 +4873,14 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             crumb_runtime[stmt.name]["owned"] = True
                         if _src_vn in crumb_runtime:
                             crumb_runtime[_src_vn]["owned"] = False
+                elif isinstance(stmt.expr, BinOp):
+                    _binop_ty = infer_type(stmt.expr)
+                    if _binop_ty == "string" or (
+                        isinstance(_binop_ty, str) and _binop_ty.endswith("*")
+                    ):
+                        owned_vars.add(stmt.name)
+                        if stmt.name in crumb_runtime:
+                            crumb_runtime[stmt.name]["owned"] = True
                 return
             if src_llvm.endswith("*") and not llvm_ty.endswith("*"):
                 bhumi_report_error(
