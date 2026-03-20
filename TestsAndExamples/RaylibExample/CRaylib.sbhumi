@@ -3,7 +3,7 @@ pub extern fn SetTargetFPS(int32 fps) <void>;
 pub extern fn WindowShouldClose() <bool>;
 pub extern fn BeginDrawing() <void>;
 pub extern fn EndDrawing() <void>;
-pub extern fn ClearBackground(int32 color) <void>;
+pub extern fn ClearBackground(Color color) <void>;
 pub extern fn DrawText(string text, int32 x, int32 y, int32 font_size, int32 color) <void>;
 pub extern fn CloseWindow() <void>;
 pub extern fn GetMonitorRefreshRate(int32 monitor) <int32>;
@@ -23,6 +23,13 @@ struct Texture {
     int32 height;
     int32 mipmaps;
     int32 format;
+}
+
+packed struct Color {
+    uint8 r;
+    uint8 g;
+    uint8 b;
+    uint8 a;
 }
 
 fn ColorRGBA(uint8 r, uint8 g, uint8 b, uint8 a) <int32> {
