@@ -636,6 +636,22 @@ def llvm_int_bitsize(ty: str) -> Optional[int]:
     if m := re.fullmatch(r"i(\d+)", ty):
         return int(m.group(1))
     return None
+def _struct_c_abi_int(struct_name: str) -> Optional[str]:
+    if struct_name not in packed_struct_names:
+        return None
+    fields = struct_field_map.get(struct_name)
+    if not fields:
+        return None
+    total_bits = 0
+    for (_, ftyp) in fields:
+        fllvm = llvm_ty_of(ftyp)
+        if not fllvm.startswith("i") or fllvm.endswith("*"):
+            return None
+        try:
+            total_bits += int(fllvm[1:])
+        except Exception:
+            return None
+    return {8: "i8", 16: "i16", 32: "i32", 64: "i64"}.get(total_bits)
 def emit_cast_value(
     val: Optional[str], src_t: str, dst_t: str, out: List[str]
 ) -> Optional[str]:
@@ -1241,6 +1257,7 @@ class Program:
     globals: List[GlobalVar]
 string_constants: List[str] = []
 struct_field_map: Dict[str, List[Tuple[str, str]]] = {}
+packed_struct_names: set = set()
 generated_mono: Dict[str, bool] = {}
 all_funcs: List[Func] = []
 _func_name_map: Dict[str, "Func"] = {}
@@ -3850,18 +3867,34 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 return llvm_ty, zero_const_for_llvm(llvm_ty)
             return llvm_ty, a_val
         args_ir = []
+        def _emit_call_arg(a_val, a_ty, param_typ, fn_for_extern):
+            llvm_param_ty = llvm_ty_of(param_typ)
+            is_extern_call = fn_for_extern is not None and getattr(fn_for_extern, "is_extern", False)
+            if a_val is None:
+                if is_extern_call and llvm_param_ty.startswith("%struct.") and not llvm_param_ty.endswith("*"):
+                    abi_int = _struct_c_abi_int(llvm_param_ty[len("%struct."):])
+                    if abi_int:
+                        return abi_int, "0"
+                return llvm_param_ty, zero_const_for_llvm(llvm_param_ty)
+            cast_tmp = emit_cast_value(a_val, a_ty, param_typ, out)
+            if is_extern_call and llvm_param_ty.startswith("%struct.") and not llvm_param_ty.endswith("*"):
+                abi_int = _struct_c_abi_int(llvm_param_ty[len("%struct."):])
+                if abi_int:
+                    slot = new_tmp()
+                    out.append(f"  {slot} = alloca {llvm_param_ty}")
+                    out.append(f"  store {llvm_param_ty} {cast_tmp}, {llvm_param_ty}* {slot}")
+                    int_ptr = new_tmp()
+                    out.append(f"  {int_ptr} = bitcast {llvm_param_ty}* {slot} to {abi_int}*")
+                    int_val = new_tmp()
+                    out.append(f"  {int_val} = load {abi_int}, {abi_int}* {int_ptr}")
+                    return abi_int, int_val
+            return llvm_param_ty, cast_tmp
         if concrete_fn:
             for (param_typ, _), a_val, a_ty in zip(
                 concrete_fn.params, arg_vals, arg_types
             ):
-                llvm_param_ty = llvm_ty_of(param_typ)
-                if a_val is None:
-                    args_ir.append(
-                        f"{llvm_param_ty} {zero_const_for_llvm(llvm_param_ty)}"
-                    )
-                else:
-                    cast_tmp = emit_cast_value(a_val, a_ty, param_typ, out)
-                    args_ir.append(f"{llvm_param_ty} {cast_tmp}")
+                emit_ty, emit_val = _emit_call_arg(a_val, a_ty, param_typ, concrete_fn)
+                args_ir.append(f"{emit_ty} {emit_val}")
             if getattr(concrete_fn, "is_variadic", False):
                 fixed_count = len(concrete_fn.params)
                 for idx in range(fixed_count, len(arg_vals)):
@@ -3873,12 +3906,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             fn_def = next((f for f in all_funcs if f.name == expr.name), None)
             if fn_def is not None and getattr(fn_def, "params", None):
                 for (param_typ, _), a_val, a_ty in zip(fn_def.params, arg_vals, arg_types):
-                    llvm_param_ty = llvm_ty_of(param_typ)
-                    if a_val is None:
-                        args_ir.append(f"{llvm_param_ty} {zero_const_for_llvm(llvm_param_ty)}")
-                    else:
-                        cast_tmp = emit_cast_value(a_val, a_ty, param_typ, out)
-                        args_ir.append(f"{llvm_param_ty} {cast_tmp}")
+                    emit_ty, emit_val = _emit_call_arg(a_val, a_ty, param_typ, fn_def)
+                    args_ir.append(f"{emit_ty} {emit_val}")
                 if getattr(fn_def, "is_variadic", False):
                     fixed_count = len(fn_def.params)
                     for idx in range(fixed_count, len(arg_vals)):
@@ -5888,7 +5917,14 @@ def gen_func(fn: Func) -> List[str]:
             "extern functions cannot use '#' as a return type",
         )
     if fn.is_extern:
-        param_sig = ", ".join(f"{llvm_ty_of(t)} %{n}" for t, n in fn.params)
+        def _extern_param_llvm(t: str) -> str:
+            lt = llvm_ty_of(t)
+            if lt.startswith("%struct.") and not lt.endswith("*"):
+                abi_int = _struct_c_abi_int(lt[len("%struct."):])
+                if abi_int:
+                    return abi_int
+            return lt
+        param_sig = ", ".join(f"{_extern_param_llvm(t)} %{n}" for t, n in fn.params)
         ret_ty = llvm_ty_of(fn.ret_type)
         generated_mono[fn.name] = True
         _restore_outer()
@@ -7373,6 +7409,8 @@ entry:
     for sdef in prog.structs:
         field_tys: List[str] = []
         struct_field_map[sdef.name] = [(f.name, f.typ) for f in sdef.fields]
+        if getattr(sdef, 'packed', False):
+            packed_struct_names.add(sdef.name)
         for fld in sdef.fields:
             fllvm = llvm_ty_of(fld.typ)
             if getattr(sdef, 'packed', False) and fllvm.startswith("[") and fllvm.endswith("]*"):
@@ -7594,6 +7632,8 @@ def check_types(prog: Program):
         original_enum_defs[ename] = edef
     for sdef in prog.structs:
         struct_field_map[sdef.name] = [(fld.name, fld.typ) for fld in sdef.fields]
+        if getattr(sdef, 'packed', False):
+            packed_struct_names.add(sdef.name)
     for struct_name in struct_defs:
         env.declare(struct_name, struct_name)
     for ename, edef in enum_defs.items():
@@ -7611,6 +7651,36 @@ def check_types(prog: Program):
     for ename, edef in enum_defs.items():
         for v in edef.variants:
             variant_map.setdefault(v.name, []).append((ename, v.typ))
+    _known_base_types = set(type_map.keys()) | set(struct_defs.keys()) | set(enum_defs.keys())
+    for fn in prog.funcs:
+        fn_type_params: set = set(getattr(fn, "type_params", None) or [])
+        ret_base = fn.ret_type.rstrip("*")
+        if "[" in ret_base:
+            ret_base = ret_base.split("[", 1)[0]
+        if "<" in ret_base:
+            ret_base = ret_base.split("<", 1)[0]
+        if (ret_base
+                and ret_base not in _known_base_types
+                and ret_base != "#"
+                and ret_base not in fn_type_params):
+            bhumi_report_error(
+                getattr(fn, "lineno", None), None,
+                f"Unknown return type '{fn.ret_type}' in function '{fn.name}'"
+            )
+        for (ptyp, pname) in fn.params:
+            base = ptyp.rstrip("*")
+            if "[" in base:
+                base = base.split("[", 1)[0]
+            if "<" in base:
+                base = base.split("<", 1)[0]
+            if (base
+                    and base not in _known_base_types
+                    and base != "#"
+                    and base not in fn_type_params):
+                bhumi_report_error(
+                    getattr(fn, "lineno", None), None,
+                    f"Unknown type '{ptyp}' for parameter '{pname}' in function '{fn.name}'"
+                )
     def eval_const_int(e):
         if e is None:
             return None
@@ -9747,6 +9817,7 @@ def main():
     enum_variant_map.clear()
     symbol_table.clear()
     struct_field_map.clear()
+    packed_struct_names.clear()
     string_constants.clear()
     generated_mono.clear()
     _llvm_to_lang_cache.clear()
