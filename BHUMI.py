@@ -4168,7 +4168,16 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         None, None, f"Field '{field_name}' not in struct '{struct_name}'"
                     )
                 field_llvm = llvm_ty_of(field_dict[field_name])
-                field_vals[field_name] = (field_llvm, gen_expr(field_expr, out))
+                fval = gen_expr(field_expr, out)
+                inferred_llvm = llvm_ty_of(infer_type(field_expr))
+                if inferred_llvm != field_llvm and inferred_llvm.startswith("i") and field_llvm.startswith("i"):
+                    coerced = new_tmp()
+                    if int(inferred_llvm[1:]) > int(field_llvm[1:]):
+                        out.append(f"  {coerced} = trunc {inferred_llvm} {fval} to {field_llvm}")
+                    else:
+                        out.append(f"  {coerced} = zext {inferred_llvm} {fval} to {field_llvm}")
+                    fval = coerced
+                field_vals[field_name] = (field_llvm, fval)
             agg = "undef"
             for i, (fname, _) in enumerate(struct_field_map[struct_name]):
                 fllvm, fval = field_vals[fname]
@@ -4192,6 +4201,14 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             field_type = field_dict[field_name]
             field_llvm = llvm_ty_of(field_type)
             field_val = gen_expr(field_expr, out)
+            inferred_llvm = llvm_ty_of(infer_type(field_expr))
+            if inferred_llvm != field_llvm and inferred_llvm.startswith("i") and field_llvm.startswith("i"):
+                coerced = new_tmp()
+                if int(inferred_llvm[1:]) > int(field_llvm[1:]):
+                    out.append(f"  {coerced} = trunc {inferred_llvm} {field_val} to {field_llvm}")
+                else:
+                    out.append(f"  {coerced} = zext {inferred_llvm} {field_val} to {field_llvm}")
+                field_val = coerced
             index = list(field_dict.keys()).index(field_name)
             ptr = new_tmp()
             out.append(
