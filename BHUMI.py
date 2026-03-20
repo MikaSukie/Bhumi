@@ -50,10 +50,18 @@ def bhumi_report_error(
             pointer += "~" * (length - 1)
         print(pointer)
     sys.exit(1)
+_llvm_to_lang_cache: Dict[str, str] = {}
 def llvm_to_lang(llvm_t: str) -> str:
-    for high, low in type_map.items():
-        if low == llvm_t:
-            return high
+    cached = _llvm_to_lang_cache.get(llvm_t)
+    if cached is not None:
+        return cached
+    result = _llvm_to_lang_impl(llvm_t)
+    _llvm_to_lang_cache[llvm_t] = result
+    return result
+def _llvm_to_lang_impl(llvm_t: str) -> str:
+    found = _reverse_type_map.get(llvm_t)
+    if found is not None:
+        return found
     if llvm_t.startswith("%struct.") and llvm_t.endswith("*"):
         return llvm_t[len("%struct.") : -1] + "*"
     if llvm_t.startswith("%struct.") and not llvm_t.endswith("*"):
@@ -131,13 +139,27 @@ MULTI_CHARS = {
     "->": "ARROW",
     "~": "TILDE",
 }
-class SymbolTable:
+_MULTI_CHARS_SORTED: List[Tuple[str, str]] = sorted(MULTI_CHARS.items(), key=lambda x: -len(x[0]))
+class ScopedTable:
+    __slots__ = ("scopes",)
     def __init__(self):
-        self.scopes: List[Dict[str, Tuple[str, str]]] = [{}]
+        self.scopes: List[Dict] = [{}]
     def push(self):
         self.scopes.append({})
     def pop(self):
         self.scopes.pop()
+    def declare(self, name: str, *value):
+        self.scopes[-1][name] = value[0] if len(value) == 1 else value
+    def lookup(self, name: str):
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        return None
+    def current(self) -> Dict:
+        return self.scopes[-1]
+    def clear(self):
+        self.scopes = [{}]
+class SymbolTable(ScopedTable):
     def declare(self, name: str, llvm_type: str, ir_name: str):
         self.scopes[-1][name] = (llvm_type, ir_name)
     def lookup(self, name: str) -> Optional[Tuple[str, str]]:
@@ -145,17 +167,7 @@ class SymbolTable:
             if name in scope:
                 return scope[name]
         return None
-    def current(self) -> Dict[str, Tuple[str, str]]:
-        return self.scopes[-1]
-    def clear(self):
-        self.scopes = [{}]
-class TypeEnv:
-    def __init__(self):
-        self.scopes: List[Dict[str, str]] = [{}]
-    def push(self):
-        self.scopes.append({})
-    def pop(self):
-        self.scopes.pop()
+class TypeEnv(ScopedTable):
     def declare(self, name: str, typ: str):
         self.scopes[-1][name] = typ
     def lookup(self, name: str) -> Optional[str]:
@@ -292,23 +304,9 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
     subst: Dict[str, str] = {}
     for tp_name, actual in zip(template.type_params, actual_types):
         subst[tp_name] = actual
-    def _subst_t(typ: Optional[str]) -> Optional[str]:
-        if typ is None:
-            return None
-        if typ in subst:
-            return subst[typ]
-        for k, v in subst.items():
-            if typ == k:
-                return v
-            if typ.startswith(k) and typ[len(k):] in ("*", "[]"):
-                return v + typ[len(k):]
-        t = typ
-        for k, v in subst.items():
-            t = re.sub(r'\b' + re.escape(k) + r'\b', v, t)
-        return t
     new_variants: List[Tuple[str, Optional[str]]] = []
     for v in template.variants:
-        payload = _subst_t(v.typ)
+        payload = _subst_type(v.typ, subst)
         new_variants.append((v.name, payload))
     unresolved = [
         (vname, payload)
@@ -396,15 +394,6 @@ def ensure_monomorph_call(
                     subst_map[tp] = actual
     if base_fn.ret_type == "#" and expected_ret is not None:
         subst_map["#"] = expected_ret
-    def _subst_type(t: Optional[str], subst: Dict[str, str]) -> Optional[str]:
-        if t is None:
-            return None
-        for k, v in subst.items():
-            if t == k:
-                return v
-            if t.startswith(k) and t[len(k) :] in ("*", "[]"):
-                return v + t[len(k) :]
-        return t
     def replace_in_expr(e: Expr):
         if e is None:
             return None
@@ -630,21 +619,18 @@ def _subst_type(typ: Optional[str], subst: Dict[str, str]) -> Optional[str]:
     for param, concrete in subst.items():
         if typ == param:
             return concrete
-        if typ.startswith(param) and typ[len(param) :] in ("*", "[]"):
-            return concrete + typ[len(param) :]
-    return typ
+        if typ.startswith(param) and typ[len(param):] in ("*", "[]"):
+            return concrete + typ[len(param):]
+    result = typ
+    for k, v in subst.items():
+        result = re.sub(r'\b' + re.escape(k) + r'\b', v, result)
+    return result
 def mangle_type(typ: str) -> str:
     if typ is None:
         return "void"
-    t = typ
-    t = t.replace("%struct.", "struct_")
-    t = t.replace("%enum.", "enum_")
-    t = t.replace("*", "_ptr")
-    t = t.replace("[", "_").replace("]", "")
-    for ch in [" ", ",", ".", "<", ">", ":", "/", "\\", "%"]:
-        t = t.replace(ch, "_")
-    while "__" in t:
-        t = t.replace("__", "_")
+    t = typ.replace("%struct.", "struct_").replace("%enum.", "enum_").replace("*", "_ptr")
+    t = re.sub(r'[\[\] ,.<>:/\\%]', '_', t)
+    t = re.sub(r'_+', '_', t)
     return t.strip("_")
 def llvm_int_bitsize(ty: str) -> Optional[int]:
     if m := re.fullmatch(r"i(\d+)", ty):
@@ -926,7 +912,7 @@ def lex(source: str) -> List[Token]:
                 )
             continue
         matched = False
-        for mc, kind in MULTI_CHARS.items():
+        for mc, kind in _MULTI_CHARS_SORTED:
             if source.startswith(mc, i):
                 tokens.append(Token(kind, mc, line, col))
                 i += len(mc)
@@ -2335,37 +2321,44 @@ type_map = {
 struct_llvm_defs: List[str] = []
 symbol_table = SymbolTable()
 func_table: Dict[str, str] = {}
-_BUILTIN_FUNC_RETURN_TYPES: Dict[str, str] = {
-    "exit":                          "void",
-    "malloc":                        "void*",
-    "free":                          "void",
-    "bhumi_free":                    "void",
-    "bhumi_c_free":                  "void",
-    "bhumi_safe_c_free":             "void",
-    "bhumi_tbl_insert":              "void",
-    "bhumi_tbl_remove":              "void",
-    "bhumi_tbl_contains":            "bool",
-    "bhumi_ctbl_insert":             "void",
-    "bhumi_ctbl_remove":             "void",
-    "bhumi_ctbl_contains":           "bool",
-    "bhumi_null_abort":              "void",
-    "bhumi_oob_abort":               "void",
-    "bhumi_init_runtime":            "void",
-    "bhumi_register_async":          "void",
-    "bhumi_block_until_complete":    "void",
-    "bhumi_alloc_size":              "int",
-    "bhumi_argc":                    "int",
-    "bhumi_argv":                    "string",
-    "puts":                          "int32",
-    "strlen":                        "int",
-    "time":                          "int",
-    "srand":                         "void",
-    "rand":                          "int32",
-    "usleep":                        "int32",
-    "malloc_usable_size":            "int",
-    "signal":                        "void*",
-    "llvm.memcpy.p0i8.p0i8.i64":    "void",
+_reverse_type_map: Dict[str, str] = {}
+for _hl, _ll in type_map.items():
+    if _ll not in _reverse_type_map:
+        _reverse_type_map[_ll] = _hl
+_BUILTIN_REGISTRY: Dict[str, Tuple[str, str]] = {
+    "exit":                         ("void",    "void"),
+    "malloc":                       ("void*",   "i8*"),
+    "free":                         ("void",    "void"),
+    "puts":                         ("int32",   "i32"),
+    "strlen":                       ("int",     "i64"),
+    "time":                         ("int",     "i64"),
+    "srand":                        ("void",    "void"),
+    "rand":                         ("int32",   "i32"),
+    "usleep":                       ("int32",   "i32"),
+    "malloc_usable_size":           ("int",     "i64"),
+    "signal":                       ("void*",   "i8*"),
+    "llvm.memcpy.p0i8.p0i8.i64":   ("void",    "void"),
+    "bhumi_free":                   ("void",    "void"),
+    "bhumi_c_free":                 ("void",    "void"),
+    "bhumi_safe_c_free":            ("void",    "void"),
+    "bhumi_ffi_free":               ("void",    "void"),
+    "bhumi_alloc_size":             ("int",     "i64"),
+    "bhumi_null_abort":             ("void",    "void"),
+    "bhumi_oob_abort":              ("void",    "void"),
+    "bhumi_tbl_insert":             ("void",    "void"),
+    "bhumi_tbl_remove":             ("void",    "void"),
+    "bhumi_tbl_contains":           ("bool",    "i1"),
+    "bhumi_ctbl_insert":            ("void",    "void"),
+    "bhumi_ctbl_remove":            ("void",    "void"),
+    "bhumi_ctbl_contains":          ("bool",    "i1"),
+    "bhumi_init_runtime":           ("void",    "void"),
+    "bhumi_argc":                   ("int",     "i64"),
+    "bhumi_argv":                   ("string",  "i8*"),
+    "bhumi_register_async":         ("void",    "void"),
+    "bhumi_block_until_complete":   ("void",    "void"),
 }
+_BUILTIN_FUNC_RETURN_TYPES: Dict[str, str] = {k: v[0] for k, v in _BUILTIN_REGISTRY.items()}
+_BUILTIN_LLVM_TYPES: Dict[str, str] = {k: v[1] for k, v in _BUILTIN_REGISTRY.items()}
 def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str | None:
     if isinstance(expr, CallerType):
         bhumi_report_error(
@@ -6402,28 +6395,7 @@ def compile_program(prog: Program) -> str:
             continue
         llvm_ret_ty = llvm_ty_of(fn.ret_type)
         func_table[fn.name] = llvm_ret_ty
-    func_table["exit"] = "void"
-    func_table["malloc"] = "i8*"
-    func_table["free"] = "void"
-    func_table["bhumi_c_free"] = "void"
-    func_table["bhumi_safe_c_free"] = "void"
-    func_table["bhumi_ffi_free"] = "void"
-    func_table["bhumi_tbl_insert"] = "void"
-    func_table["bhumi_tbl_remove"] = "void"
-    func_table["bhumi_tbl_contains"] = "i1"
-    func_table["bhumi_ctbl_insert"] = "void"
-    func_table["bhumi_ctbl_remove"] = "void"
-    func_table["bhumi_ctbl_contains"] = "i1"
-    func_table["puts"] = "i32"
-    func_table["strlen"] = "i64"
-    func_table["bhumi_argc"] = "i64"
-    func_table["bhumi_argv"] = "i8*"
-    func_table["rand"] = "i32"
-    func_table["srand"] = "void"
-    func_table["time"] = "i64"
-    func_table["usleep"] = "i32"
-    func_table["malloc_usable_size"] = "i64"
-    func_table["signal"] = "i8*"
+    func_table.update(_BUILTIN_LLVM_TYPES)
     has_user_main = False
     for fn in prog.funcs:
         if fn.name == "main":
@@ -7601,10 +7573,6 @@ def check_types(prog: Program):
     struct_defs: Dict[str, StructDef] = {s.name: s for s in prog.structs}
     enum_defs: Dict[str, EnumDef] = {e.name: e for e in prog.enums}
     global original_enum_defs
-    try:
-        original_enum_defs
-    except NameError:
-        original_enum_defs = {}
     for ename, edef in enum_defs.items():
         original_enum_defs[ename] = edef
     for sdef in prog.structs:
@@ -9753,14 +9721,18 @@ class AsyncStateMachine:
         return lines
 def main():
     global all_funcs, func_table, builtins_emitted
+    global tmp_id, label_id
     all_funcs = []
     func_table = {}
     builtins_emitted = False
+    tmp_id = 0
+    label_id = 0
     enum_variant_map.clear()
     symbol_table.clear()
     struct_field_map.clear()
     string_constants.clear()
     generated_mono.clear()
+    _llvm_to_lang_cache.clear()
     parser = argparse.ArgumentParser(description="Bhumi Compiler")
     parser.add_argument("input", help="Input source file (.bhumi or .sbhumi)")
     parser.add_argument(
@@ -9901,24 +9873,7 @@ def main():
         if _fn.type_params or _fn.ret_type == "#":
             continue
         func_table[_fn.name] = llvm_ty_of(_fn.ret_type)
-    func_table.update({
-        "exit": "void", "malloc": "i8*", "free": "void",
-        "bhumi_c_free": "void",
-        "bhumi_tbl_insert": "void", "bhumi_tbl_remove": "void",
-        "bhumi_tbl_contains": "i1",
-        "puts": "i32", "strlen": "i64",
-        "bhumi_argc": "i64", "bhumi_argv": "i8*",
-        "time": "i64", "srand": "void", "rand": "i32", "usleep": "i32",
-        "bhumi_alloc_size": "i64", "bhumi_free": "void",
-        "bhumi_safe_c_free": "void",
-        "bhumi_null_abort": "void", "bhumi_oob_abort": "void",
-        "bhumi_init_runtime": "void",
-        "bhumi_ctbl_insert": "void", "bhumi_ctbl_remove": "void",
-        "bhumi_ctbl_contains": "i1",
-        "bhumi_register_async": "void",
-        "bhumi_block_until_complete": "void",
-        "signal": "i8*",
-    })
+    func_table.update(_BUILTIN_LLVM_TYPES)
     annotate_types(final_prog)
     llvm = compile_program(final_prog)
     with open(args.output, "w", encoding="utf-8", errors="ignore") as f:
