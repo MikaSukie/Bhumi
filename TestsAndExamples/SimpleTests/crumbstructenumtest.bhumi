@@ -1,0 +1,43 @@
+struct Player {
+    int health;
+    int ammo;
+}
+
+enum Direction {
+    North;
+    South;
+    East;
+    West;
+}
+
+fn main() <void> {
+    // --- struct field: limited reads, unlimited writes ---
+    // omitting !w means writes are infinite; !r=2 caps reads at 2
+    Player p = Player { health(100); ammo(30); }
+    crumble(p.health)!r=2;
+    int a = p.health;   // read 1, ok
+    int b = p.health;   // read 2, ok
+    // int c = p.health; // read 3, would warn: reads exhausted
+    p.health = 50;      // write, ok, unlimited
+
+    // --- struct field: limited writes, unlimited reads ---
+    // omitting !r means reads are infinite; !w=1 caps writes at 1
+    crumble(p.ammo)!w=1;
+    p.ammo = 15;        // write 1, ok
+    // p.ammo = 5;       // would warn: write exhausted
+    int d = p.ammo;     // read, ok, unlimited
+
+    // --- const-like field: block writes entirely with !w=0 ---
+    // crumble(p.health)!w=0; would make health truly read-only
+
+    // --- namespaced enum variant: limited reads ---
+    crumble(Direction->North)!r=2;
+    Direction d1 = Direction->North;   // read 1, ok
+    Direction d2 = Direction->North;   // read 2, ok
+    // Direction d3 = Direction->North; // would warn: reads exhausted
+
+    // --- bare enum variant: limited reads ---
+    crumble(South)!r=1;
+    Direction d3 = Direction->South;   // read 1, ok
+    // Direction d4 = Direction->South; // would warn: reads exhausted
+}
