@@ -1782,6 +1782,17 @@ class Parser:
             return self.parse_index_assign()
         if (
             t.kind == "IDENT"
+            and self.tokens[self.pos + 1].kind == "DOT"
+            and self.tokens[self.pos + 2].kind == "IDENT"
+            and self.tokens[self.pos + 3].kind in {
+                "EQUAL",
+                "PLUSEQ", "MINUSEQ", "STAREQ", "SLASHEQ", "PERCENTEQ",
+                "ANDEQ", "OREQ", "XOREQ", "LSHIFTEQ", "RSHIFTEQ",
+            }
+        ):
+            return self.parse_field_assign()
+        if (
+            t.kind == "IDENT"
             and t.value == "forget"
             and self.tokens[self.pos + 1].kind == "LPAREN"
         ):
@@ -1883,6 +1894,14 @@ class Parser:
     def parse_crumble(self) -> CrumbleStmt:
         self.expect("LPAREN")
         var_name = self.expect("IDENT").value
+        if self.peek().kind == "DOT":
+            self.bump()
+            part = self.expect("IDENT").value
+            var_name = var_name + "." + part
+        elif self.peek().kind == "ARROW":
+            self.bump()
+            part = self.expect("IDENT").value
+            var_name = var_name + "->" + part
         self.expect("RPAREN")
         max_r, max_w = None, None
         while self.match("BANG"):
@@ -2024,6 +2043,28 @@ class Parser:
         value = self.parse_expr()
         self.expect("SEMI")
         return IndexAssign(arr_name, index, value)
+    def parse_field_assign(self) -> Assign:
+        base_name = self.expect("IDENT").value
+        self.expect("DOT")
+        field_name = self.expect("IDENT").value
+        op_token = self.bump()
+        expr = self.parse_expr()
+        self.expect("SEMI")
+        lvalue = FieldAccess(Var(base_name), field_name)
+        if op_token.kind == "EQUAL":
+            return Assign(lvalue, expr)
+        compound_map = {
+            "PLUSEQ": "+", "MINUSEQ": "-", "STAREQ": "*", "SLASHEQ": "/",
+            "PERCENTEQ": "%", "ANDEQ": "&", "OREQ": "|", "XOREQ": "^",
+            "LSHIFTEQ": "<<", "RSHIFTEQ": ">>",
+        }
+        op = compound_map.get(op_token.kind)
+        if op is None:
+            bhumi_report_error(
+                op_token.line, op_token.col,
+                f"Unknown field assignment operator: {op_token.kind}",
+            )
+        return Assign(lvalue, BinOp(op, FieldAccess(Var(base_name), field_name), expr))
     def parse_if(self) -> IfStmt:
         self.expect("IF")
         self.expect("LPAREN")
@@ -4960,6 +5001,37 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             val_ty = infer_type(stmt.expr)
             llvm_ty = llvm_ty_of(val_ty)
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {ptr_val}")
+        elif isinstance(stmt.name, FieldAccess):
+            field_base = stmt.name.base
+            field_name = stmt.name.field
+            base_raw = infer_type(field_base)
+            base_struct = base_raw.rstrip("*")
+            if base_struct.startswith("%struct."):
+                base_struct = base_struct[len("%struct."):]
+            fields = struct_field_map[base_struct]
+            field_dict = dict(fields)
+            index = list(field_dict.keys()).index(field_name)
+            field_typ = field_dict[field_name]
+            field_llvm = llvm_ty_of(field_typ)
+            if isinstance(field_base, Var):
+                res = symbol_table.lookup(field_base.name)
+                llvm_var_ty, var_ir = res
+                if llvm_var_ty.endswith("*"):
+                    ptr_load = new_tmp()
+                    out.append(f"  {ptr_load} = load {llvm_var_ty}, {llvm_var_ty}* %{var_ir}_addr")
+                    base_ptr = ptr_load
+                else:
+                    base_ptr = f"%{var_ir}_addr"
+            else:
+                base_ptr = gen_expr(field_base, out)
+            val = gen_expr(stmt.expr, out, expected=field_typ)
+            gep = new_tmp()
+            out.append(
+                f"  {gep} = getelementptr inbounds %struct.{base_struct}, "
+                f"%struct.{base_struct}* {base_ptr}, i32 0, i32 {index}"
+            )
+            out.append(f"  store {field_llvm} {val}, {field_llvm}* {gep}")
+            return
         else:
             llvm_ty, ir_name = symbol_table.lookup(stmt.name)
             if ir_name.startswith("@"):
@@ -7901,6 +7973,10 @@ def check_types(prog: Program):
             variant_name = expr.name
             if "->" in expr.name:
                 qualified_enum, variant_name = expr.name.split("->", 1)
+                _inc_read(
+                    expr.name,
+                    node_desc=f"EnumVariantCall@{getattr(expr, 'lineno', '?')}",
+                )
             _arg_expected: List[Optional[str]] = [None] * len(expr.args)
             if "->" in expr.name and expected is not None:
                 _gm_ae = re.fullmatch(r"[A-Za-z_]\w*<(.+)>", expected.rstrip("*"))
@@ -8519,10 +8595,16 @@ def check_types(prog: Program):
             base_type = check_expr(expr.base).rstrip("*")
             if "<" in base_type:
                 base_type = base_type.split("<", 1)[0]
+            _fa_base_name = expr.base.name if isinstance(expr.base, Var) else None
             if base_type in struct_defs:
                 fields = struct_field_map[base_type]
                 for (fname, ftyp) in fields:
                     if fname == expr.field:
+                        if _fa_base_name is not None:
+                            _inc_read(
+                                f"{_fa_base_name}.{expr.field}",
+                                node_desc=f"FieldRead@{getattr(expr, 'lineno', '?')}",
+                            )
                         return ftyp
                 bhumi_report_error(
                     getattr(expr, "lineno", None),
@@ -8792,6 +8874,37 @@ def check_types(prog: Program):
                         node_desc=f"UnaryDerefWrite@{getattr(stmt, 'lineno', None)}",
                     )
                 return
+            if isinstance(stmt.name, FieldAccess):
+                _lv_base = stmt.name.base
+                _lv_field = stmt.name.field
+                _lv_base_name = _lv_base.name if isinstance(_lv_base, Var) else None
+                _lv_base_type = check_expr(_lv_base).rstrip("*")
+                if "<" in _lv_base_type:
+                    _lv_base_type = _lv_base_type.split("<", 1)[0]
+                if _lv_base_type in struct_defs:
+                    _lv_fields = struct_field_map[_lv_base_type]
+                    _lv_ftyp = next((ft for (fn, ft) in _lv_fields if fn == _lv_field), None)
+                    if _lv_ftyp is None:
+                        bhumi_report_error(
+                            getattr(stmt, "lineno", None),
+                            getattr(stmt, "col", None),
+                            f"Struct '{_lv_base_type}' has no field '{_lv_field}'",
+                        )
+                    check_expr(stmt.expr, expected=_lv_ftyp)
+                elif _lv_base_type in enum_defs:
+                    check_expr(stmt.expr)
+                else:
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Field assign on non-struct/enum type '{_lv_base_type}'",
+                    )
+                if _lv_base_name is not None:
+                    _inc_write(
+                        f"{_lv_base_name}.{_lv_field}",
+                        node_desc=f"FieldAssignWrite@{getattr(stmt, 'lineno', '?')}",
+                    )
+                return
             var_type = env.lookup(stmt.name)
             if isinstance(stmt.expr, AddressOf) and (
                 var_type is not None and var_type.endswith("*")
@@ -8945,12 +9058,59 @@ def check_types(prog: Program):
             env.declare(stmt.varname, "undefined")
             return
         if isinstance(stmt, CrumbleStmt):
-            if env.lookup(stmt.name) is None:
-                bhumi_report_error(
-                    getattr(stmt, "lineno", None),
-                    getattr(stmt, "col", None),
-                    f"Cannot crumble undeclared variable '{stmt.name}'",
-                )
+            if "->" in stmt.name:
+                _crumb_enum, _crumb_variant = stmt.name.split("->", 1)
+                if _crumb_enum not in enum_variant_map:
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Cannot crumble: '{_crumb_enum}' is not a known enum",
+                    )
+                _crumb_variants = enum_variant_map[_crumb_enum]
+                if not any(_vn == _crumb_variant for (_vn, _) in _crumb_variants):
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Enum '{_crumb_enum}' has no variant '{_crumb_variant}'",
+                    )
+            elif "." in stmt.name:
+                _crumb_prefix, _crumb_suffix = stmt.name.split(".", 1)
+                _crumb_prefix_type = env.lookup(_crumb_prefix)
+                if _crumb_prefix_type is None:
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Cannot crumble: '{_crumb_prefix}' is not declared",
+                    )
+                _crumb_base_type = _crumb_prefix_type.rstrip("*")
+                if "<" in _crumb_base_type:
+                    _crumb_base_type = _crumb_base_type.split("<", 1)[0]
+                if _crumb_base_type not in struct_defs:
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Cannot crumble field of non-struct type '{_crumb_base_type}'",
+                    )
+                _crumb_fields = struct_field_map[_crumb_base_type]
+                if not any(_fn == _crumb_suffix for (_fn, _) in _crumb_fields):
+                    bhumi_report_error(
+                        getattr(stmt, "lineno", None),
+                        getattr(stmt, "col", None),
+                        f"Struct '{_crumb_base_type}' has no field '{_crumb_suffix}'",
+                    )
+            else:
+                if env.lookup(stmt.name) is None:
+                    _is_bare_variant = any(
+                        stmt.name == _vname
+                        for _vlist in enum_variant_map.values()
+                        for (_vname, _) in _vlist
+                    )
+                    if not _is_bare_variant:
+                        bhumi_report_error(
+                            getattr(stmt, "lineno", None),
+                            getattr(stmt, "col", None),
+                            f"Cannot crumble undeclared variable '{stmt.name}'",
+                        )
             if stmt.name in crumb_map:
                 bhumi_report_error(
                     getattr(stmt, "lineno", None),
@@ -8959,19 +9119,20 @@ def check_types(prog: Program):
                 )
             crumb_map[stmt.name] = (stmt.max_reads, stmt.max_writes, 0, 0)
             crumb_order[stmt.name] = getattr(stmt, "lineno", -1)
-            new_allows_write = (stmt.max_writes is None) or (stmt.max_writes > 0)
-            if new_allows_write:
-                for original, aliases in alias_targets.items():
-                    if stmt.name not in aliases:
-                        continue
-                    for other in list(aliases):
-                        if other == stmt.name or other not in crumb_map:
+            if "." not in stmt.name and "->" not in stmt.name:
+                new_allows_write = (stmt.max_writes is None) or (stmt.max_writes > 0)
+                if new_allows_write:
+                    for original, aliases in alias_targets.items():
+                        if stmt.name not in aliases:
                             continue
-                        rmax_o, wmax_o, rc_o, wc_o = crumb_map[other]
-                        other_allows_write = (wmax_o is None) or (wmax_o > 0)
-                        if other_allows_write:
-                            crumb_map[other] = (rmax_o, wc_o, rc_o, wc_o)
-                            write_revoked.add(other)
+                        for other in list(aliases):
+                            if other == stmt.name or other not in crumb_map:
+                                continue
+                            rmax_o, wmax_o, rc_o, wc_o = crumb_map[other]
+                            other_allows_write = (wmax_o is None) or (wmax_o > 0)
+                            if other_allows_write:
+                                crumb_map[other] = (rmax_o, wc_o, rc_o, wc_o)
+                                write_revoked.add(other)
             return
         if isinstance(stmt, IndexAssign):
             arr_name = stmt.array
