@@ -5294,6 +5294,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         else_lbl = new_label("else") if stmt.else_body else None
         end_lbl = new_label("endif")
         out.append(f"  br i1 {cond}, label %{then_lbl}, label %{else_lbl or end_lbl}")
+        _if_pre_crumb = {k: dict(v) for k, v in crumb_runtime.items()}
+        _if_pre_owned = set(owned_vars)
         out.append(f"{then_lbl}:")
         symbol_table.push()
         _then_ctx = _make_scope_ctx()
@@ -5308,6 +5310,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             last.startswith("ret") or last == "unreachable" or last.startswith("br ")
         ):
             out.append(f"  br label %{end_lbl}")
+        _if_then_crumb = {k: dict(v) for k, v in crumb_runtime.items()}
+        _if_then_owned = set(owned_vars)
+        crumb_runtime.clear()
+        crumb_runtime.update({k: dict(v) for k, v in _if_pre_crumb.items()})
+        owned_vars.clear()
+        owned_vars.update(_if_pre_owned)
         if stmt.else_body:
             out.append(f"{else_lbl}:")
             symbol_table.push()
@@ -5328,12 +5336,60 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 or last.startswith("br ")
             ):
                 out.append(f"  br label %{end_lbl}")
+            _if_else_crumb = {k: dict(v) for k, v in crumb_runtime.items()}
+            _if_else_owned = set(owned_vars)
+            _if_merged_owned = _if_then_owned & _if_else_owned
+            _if_all_keys = set(_if_then_crumb.keys()) | set(_if_else_crumb.keys())
+            crumb_runtime.clear()
+            for _ck in _if_all_keys:
+                _tc = _if_then_crumb.get(_ck)
+                _ec = _if_else_crumb.get(_ck)
+                if _tc is not None and _ec is not None:
+                    crumb_runtime[_ck] = {
+                        "rmax": _tc.get("rmax"),
+                        "wmax": _tc.get("wmax"),
+                        "rc": max(_tc.get("rc", 0), _ec.get("rc", 0)),
+                        "wc": max(_tc.get("wc", 0), _ec.get("wc", 0)),
+                        "owned": _tc.get("owned", False) and _ec.get("owned", False),
+                    }
+                elif _tc is not None:
+                    crumb_runtime[_ck] = dict(_tc)
+                    crumb_runtime[_ck]["owned"] = False
+                else:
+                    crumb_runtime[_ck] = dict(_ec)
+                    crumb_runtime[_ck]["owned"] = False
+            owned_vars.clear()
+            owned_vars.update(_if_merged_owned)
+        else:
+            _if_merged_owned = _if_then_owned & _if_pre_owned
+            _if_all_keys = set(_if_then_crumb.keys()) | set(_if_pre_crumb.keys())
+            crumb_runtime.clear()
+            for _ck in _if_all_keys:
+                _tc = _if_then_crumb.get(_ck)
+                _pc = _if_pre_crumb.get(_ck)
+                if _tc is not None and _pc is not None:
+                    crumb_runtime[_ck] = {
+                        "rmax": _tc.get("rmax"),
+                        "wmax": _tc.get("wmax"),
+                        "rc": max(_tc.get("rc", 0), _pc.get("rc", 0)),
+                        "wc": max(_tc.get("wc", 0), _pc.get("wc", 0)),
+                        "owned": _tc.get("owned", False) and _pc.get("owned", False),
+                    }
+                elif _tc is not None:
+                    crumb_runtime[_ck] = dict(_tc)
+                    crumb_runtime[_ck]["owned"] = False
+                else:
+                    crumb_runtime[_ck] = dict(_pc)
+            owned_vars.clear()
+            owned_vars.update(_if_merged_owned)
         out.append(f"{end_lbl}:")
     elif isinstance(stmt, WhileStmt):
         head_lbl = new_label("while_head")
         body_lbl = new_label("while_body")
         end_lbl = new_label("while_end")
         loop_stack.append({"continue": head_lbl, "break": end_lbl})
+        _loop_pre_crumb = {k: dict(v) for k, v in crumb_runtime.items()}
+        _loop_pre_owned = set(owned_vars)
         out.append(f"  br label %{head_lbl}")
         out.append(f"{head_lbl}:")
         cond = gen_expr(stmt.cond, out, expected="bool")
@@ -5354,6 +5410,29 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             out.append(f"  br label %{head_lbl}")
         out.append(f"{end_lbl}:")
         loop_stack.pop()
+        _loop_post_crumb = {k: dict(v) for k, v in crumb_runtime.items()}
+        _loop_post_owned = set(owned_vars)
+        _loop_merged_owned = _loop_post_owned & _loop_pre_owned
+        _loop_all_keys = set(_loop_post_crumb.keys()) | set(_loop_pre_crumb.keys())
+        crumb_runtime.clear()
+        for _ck in _loop_all_keys:
+            _pc = _loop_post_crumb.get(_ck)
+            _pr = _loop_pre_crumb.get(_ck)
+            if _pc is not None and _pr is not None:
+                crumb_runtime[_ck] = {
+                    "rmax": _pc.get("rmax"),
+                    "wmax": _pc.get("wmax"),
+                    "rc": max(_pc.get("rc", 0), _pr.get("rc", 0)),
+                    "wc": max(_pc.get("wc", 0), _pr.get("wc", 0)),
+                    "owned": _pc.get("owned", False) and _pr.get("owned", False),
+                }
+            elif _pc is not None:
+                crumb_runtime[_ck] = dict(_pc)
+                crumb_runtime[_ck]["owned"] = False
+            else:
+                crumb_runtime[_ck] = dict(_pr)
+        owned_vars.clear()
+        owned_vars.update(_loop_merged_owned)
     elif isinstance(stmt, TypeSwitch):
         bhumi_report_error(
             getattr(stmt, "lineno", None),
