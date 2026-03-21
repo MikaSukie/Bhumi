@@ -9,16 +9,16 @@ fn main() <int> {
     float32 vel_x = 197.0;
     float32 vel_y = 151.0;
 
-    int32 rect_size = (int32) 100;
-    int32 screen_width = (int32) 800;
-    int32 screen_height = (int32) 450;
+    int32 rect_size = 100;
+    int32 screen_width = 800;
+    int32 screen_height = 450;
 
     uint8 r = 150;
     uint8 g = 255;
     uint8 b = 128;
 
     InitWindow(screen_width, screen_height, "Colorful DVD");
-    SetTargetFPS((int32) 60);
+    SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
         float32 dt = GetFrameTime();
