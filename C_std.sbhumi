@@ -40,6 +40,8 @@ pub extern fn fcasti32(float d) <int32>;
 pub extern fn fcasti64(float d) <int64>;
 pub extern fn fcasti(float d) <int>;
 
+pub extern fn ftoint(float32 f) <int32>;
+
 pub extern fn i8castf(int8 i) <float>;
 pub extern fn i16castf(int16 i) <float>;
 pub extern fn i32castf(int32 i) <float>;
@@ -103,9 +105,10 @@ pub fn [T] tostring(T candidate) <string> {
                 return itostr(candidate);
             }
         }
-        typecase(float) { return ftostr(candidate); }
-        typecase(bool)  { return btostr(candidate); }
-        typecase(string){ return tostr(candidate);  }
+        typecase(float)   { return ftostr(candidate);   }
+        typecase(float32) { return f32tostr(candidate); }
+        typecase(bool)    { return btostr(candidate);   }
+        typecase(string)  { return tostr(candidate);    }
     }
     return "tostring has errored as no matching typecases were found.\n";
 }
