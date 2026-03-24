@@ -439,6 +439,10 @@ char* tal(const char* s) {
     return result;
 }
 
+int ftoint(float number) {
+    return (int)number;
+}
+
 char* get_os() {
 #if defined(_WIN32)
     return safe_strdup("windows");
