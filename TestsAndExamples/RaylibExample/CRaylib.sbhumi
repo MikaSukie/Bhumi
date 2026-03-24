@@ -1,28 +1,36 @@
-pub extern fn InitWindow(int32 width, int32 height, string title) <void>;
-pub extern fn SetTargetFPS(int32 fps) <void>;
-pub extern fn WindowShouldClose() <bool>;
-pub extern fn BeginDrawing() <void>;
-pub extern fn EndDrawing() <void>;
-pub extern fn ClearBackground(Color color) <void>;
-pub extern fn DrawText(string text, int32 x, int32 y, int32 font_size, int32 color) <void>;
-pub extern fn CloseWindow() <void>;
-pub extern fn GetMonitorRefreshRate(int32 monitor) <int32>;
-pub extern fn DrawRectangle(int32 x, int32 y, int32 width, int32 height, int32 color) <void>;
-pub extern fn GetFrameTime() <float32>;
-pub extern fn LoadTexture(string filename) <Texture>;
-pub extern fn DrawTexture(Texture texture, int32 pos_x, int32 pos_y, int32 tint) <void>;
+// raylib.bhumi
+// Complete Raylib bindings for Bhumi
+// Compile & link with: -lraylib -lm -ldl -lpthread (Linux)
+//                      -lraylib -framework... (macOS)
+//                      raylib.lib (Windows)
+//
+// ============================================================
+// Structs
+// ============================================================
 
 struct Vector2 {
     float32 x;
     float32 y;
 }
 
-struct Texture {
-    uint32 id;
-    int32 width;
-    int32 height;
-    int32 mipmaps;
-    int32 format;
+struct Vector3 {
+    float32 x;
+    float32 y;
+    float32 z;
+}
+
+struct Vector4 {
+    float32 x;
+    float32 y;
+    float32 z;
+    float32 w;
+}
+
+struct Rectangle {
+    float32 x;
+    float32 y;
+    float32 width;
+    float32 height;
 }
 
 packed struct Color {
@@ -32,6 +40,650 @@ packed struct Color {
     uint8 a;
 }
 
-fn ColorRGBA(uint8 r, uint8 g, uint8 b, uint8 a) <int32> {
-    return ((int32) a <<24) | ((int32) b <<16) | ((int32) g <<8) | (int32) r;
+struct Texture {
+    uint32 id;
+    int32  width;
+    int32  height;
+    int32  mipmaps;
+    int32  format;
 }
+
+struct RenderTexture {
+    uint32  id;
+    Texture texture;
+    Texture depth;
+}
+
+struct Image {
+    void* data;
+    int32 width;
+    int32 height;
+    int32 mipmaps;
+    int32 format;
+}
+
+struct Font {
+    int32   baseSize;
+    int32   glyphCount;
+    int32   glyphPadding;
+    Texture texture;
+    void*   recs;
+    void*   glyphs;
+}
+
+struct Camera2D {
+    Vector2 offset;
+    Vector2 target;
+    float32 rotation;
+    float32 zoom;
+}
+
+struct Camera3D {
+    Vector3 position;
+    Vector3 target;
+    Vector3 up;
+    float32 fovy;
+    int32   projection;
+}
+
+struct Ray {
+    Vector3 position;
+    Vector3 direction;
+}
+
+struct BoundingBox {
+    Vector3 min;
+    Vector3 max;
+}
+
+struct NPatchInfo {
+    Rectangle source;
+    int32     left;
+    int32     top;
+    int32     right;
+    int32     bottom;
+    int32     layout;
+}
+
+struct AudioStream {
+    void*  buffer;
+    void*  processor;
+    uint32 sampleRate;
+    uint32 sampleSize;
+    uint32 channels;
+}
+
+struct Wave {
+    uint32 frameCount;
+    uint32 sampleRate;
+    uint32 sampleSize;
+    uint32 channels;
+    void*  data;
+}
+
+struct Sound {
+    AudioStream stream;
+    uint32      frameCount;
+}
+
+struct Music {
+    AudioStream stream;
+    uint32      frameCount;
+    bool        looping;
+    int32       ctxType;
+    void*       ctxData;
+}
+
+// ============================================================
+// rcore, Window management
+// ============================================================
+
+pub extern fn InitWindow(int32 width, int32 height, string title) <void>;
+pub extern fn CloseWindow() <void>;
+pub extern fn WindowShouldClose() <bool>;
+pub extern fn IsWindowReady() <bool>;
+pub extern fn IsWindowFullscreen() <bool>;
+pub extern fn IsWindowHidden() <bool>;
+pub extern fn IsWindowMinimized() <bool>;
+pub extern fn IsWindowMaximized() <bool>;
+pub extern fn IsWindowFocused() <bool>;
+pub extern fn IsWindowResized() <bool>;
+pub extern fn IsWindowState(uint32 flag) <bool>;
+pub extern fn SetWindowState(uint32 flags) <void>;
+pub extern fn ClearWindowState(uint32 flags) <void>;
+pub extern fn ToggleFullscreen() <void>;
+pub extern fn ToggleBorderlessWindowed() <void>;
+pub extern fn MaximizeWindow() <void>;
+pub extern fn MinimizeWindow() <void>;
+pub extern fn RestoreWindow() <void>;
+pub extern fn SetWindowTitle(string title) <void>;
+pub extern fn SetWindowPosition(int32 x, int32 y) <void>;
+pub extern fn SetWindowMonitor(int32 monitor) <void>;
+pub extern fn SetWindowMinSize(int32 width, int32 height) <void>;
+pub extern fn SetWindowMaxSize(int32 width, int32 height) <void>;
+pub extern fn SetWindowSize(int32 width, int32 height) <void>;
+pub extern fn SetWindowOpacity(float32 opacity) <void>;
+pub extern fn SetWindowFocused() <void>;
+pub extern fn GetScreenWidth() <int32>;
+pub extern fn GetScreenHeight() <int32>;
+pub extern fn GetRenderWidth() <int32>;
+pub extern fn GetRenderHeight() <int32>;
+pub extern fn GetMonitorCount() <int32>;
+pub extern fn GetCurrentMonitor() <int32>;
+pub extern fn GetMonitorPosition(int32 monitor) <Vector2>;
+pub extern fn GetMonitorWidth(int32 monitor) <int32>;
+pub extern fn GetMonitorHeight(int32 monitor) <int32>;
+pub extern fn GetMonitorRefreshRate(int32 monitor) <int32>;
+pub extern fn GetWindowPosition() <Vector2>;
+pub extern fn GetWindowScaleDPI() <Vector2>;
+pub extern fn GetMonitorName(int32 monitor) <string>;
+pub extern fn SetClipboardText(string text) <void>;
+pub extern fn GetClipboardText() <string>;
+pub extern fn EnableEventWaiting() <void>;
+pub extern fn DisableEventWaiting() <void>;
+
+// ============================================================
+// rcore, Cursor
+// ============================================================
+
+pub extern fn ShowCursor() <void>;
+pub extern fn HideCursor() <void>;
+pub extern fn IsCursorHidden() <bool>;
+pub extern fn EnableCursor() <void>;
+pub extern fn DisableCursor() <void>;
+pub extern fn IsCursorOnScreen() <bool>;
+
+// ============================================================
+// rcore, Drawing
+// ============================================================
+
+pub extern fn ClearBackground(Color color) <void>;
+pub extern fn BeginDrawing() <void>;
+pub extern fn EndDrawing() <void>;
+pub extern fn BeginMode2D(Camera2D camera) <void>;
+pub extern fn EndMode2D() <void>;
+pub extern fn BeginMode3D(Camera3D camera) <void>;
+pub extern fn EndMode3D() <void>;
+pub extern fn BeginTextureMode(RenderTexture target) <void>;
+pub extern fn EndTextureMode() <void>;
+pub extern fn BeginScissorMode(int32 x, int32 y, int32 width, int32 height) <void>;
+pub extern fn EndScissorMode() <void>;
+
+// ============================================================
+// rcore, Timing
+// ============================================================
+
+pub extern fn SetTargetFPS(int32 fps) <void>;
+pub extern fn GetFrameTime() <float32>;
+pub extern fn GetTime() <float>;
+pub extern fn GetFPS() <int32>;
+
+// ============================================================
+// rcore, Misc / utils
+// ============================================================
+
+pub extern fn TakeScreenshot(string fileName) <void>;
+pub extern fn SetConfigFlags(uint32 flags) <void>;
+pub extern fn OpenURL(string url) <void>;
+pub extern fn TraceLog(int32 logLevel, string text) <void>;
+pub extern fn SetTraceLogLevel(int32 logLevel) <void>;
+
+// ============================================================
+// rcore, Random
+// ============================================================
+
+pub extern fn SetRandomSeed(uint32 seed) <void>;
+pub extern fn GetRandomValue(int32 min, int32 max) <int32>;
+
+// ============================================================
+// rcore, File system helpers
+// ============================================================
+
+pub extern fn FileExists(string fileName) <bool>;
+pub extern fn DirectoryExists(string dirPath) <bool>;
+pub extern fn IsFileExtension(string fileName, string ext) <bool>;
+pub extern fn GetFileLength(string fileName) <int32>;
+pub extern fn GetFileExtension(string fileName) <string>;
+pub extern fn GetFileName(string filePath) <string>;
+pub extern fn GetFileNameWithoutExt(string filePath) <string>;
+pub extern fn GetDirectoryPath(string filePath) <string>;
+pub extern fn GetWorkingDirectory() <string>;
+pub extern fn GetApplicationDirectory() <string>;
+pub extern fn ChangeDirectory(string dir) <bool>;
+pub extern fn IsPathFile(string path) <bool>;
+
+// ============================================================
+// rcore, Camera
+// ============================================================
+
+pub extern fn UpdateCamera(Camera3D* camera, int32 mode) <void>;
+pub extern fn UpdateCameraPro(Camera3D* camera, Vector3 movement, Vector3 rotation, float32 zoom) <void>;
+
+// ============================================================
+// rcore, Input: Keyboard
+// ============================================================
+
+pub extern fn IsKeyPressed(int32 key) <bool>;
+pub extern fn IsKeyPressedRepeat(int32 key) <bool>;
+pub extern fn IsKeyDown(int32 key) <bool>;
+pub extern fn IsKeyReleased(int32 key) <bool>;
+pub extern fn IsKeyUp(int32 key) <bool>;
+pub extern fn GetKeyPressed() <int32>;
+pub extern fn GetCharPressed() <int32>;
+pub extern fn SetExitKey(int32 key) <void>;
+
+// ============================================================
+// rcore, Input: Mouse
+// ============================================================
+
+pub extern fn IsMouseButtonPressed(int32 button) <bool>;
+pub extern fn IsMouseButtonDown(int32 button) <bool>;
+pub extern fn IsMouseButtonReleased(int32 button) <bool>;
+pub extern fn IsMouseButtonUp(int32 button) <bool>;
+pub extern fn GetMouseX() <int32>;
+pub extern fn GetMouseY() <int32>;
+pub extern fn GetMousePosition() <Vector2>;
+pub extern fn GetMouseDelta() <Vector2>;
+pub extern fn SetMousePosition(int32 x, int32 y) <void>;
+pub extern fn SetMouseOffset(int32 offsetX, int32 offsetY) <void>;
+pub extern fn SetMouseScale(float32 scaleX, float32 scaleY) <void>;
+pub extern fn GetMouseWheelMove() <float32>;
+pub extern fn GetMouseWheelMoveV() <Vector2>;
+pub extern fn SetMouseCursor(int32 cursor) <void>;
+
+// ============================================================
+// rcore, Input: Touch
+// ============================================================
+
+pub extern fn GetTouchX() <int32>;
+pub extern fn GetTouchY() <int32>;
+pub extern fn GetTouchPosition(int32 index) <Vector2>;
+pub extern fn GetTouchPointId(int32 index) <int32>;
+pub extern fn GetTouchPointCount() <int32>;
+
+// ============================================================
+// rcore, Input: Gamepad
+// ============================================================
+
+pub extern fn IsGamepadAvailable(int32 gamepad) <bool>;
+pub extern fn GetGamepadName(int32 gamepad) <string>;
+pub extern fn IsGamepadButtonPressed(int32 gamepad, int32 button) <bool>;
+pub extern fn IsGamepadButtonDown(int32 gamepad, int32 button) <bool>;
+pub extern fn IsGamepadButtonReleased(int32 gamepad, int32 button) <bool>;
+pub extern fn IsGamepadButtonUp(int32 gamepad, int32 button) <bool>;
+pub extern fn GetGamepadButtonPressed() <int32>;
+pub extern fn GetGamepadAxisCount(int32 gamepad) <int32>;
+pub extern fn GetGamepadAxisMovement(int32 gamepad, int32 axis) <float32>;
+
+// ============================================================
+// rshapes, Basic 2D shapes
+// ============================================================
+
+pub extern fn DrawPixel(int32 posX, int32 posY, Color color) <void>;
+pub extern fn DrawPixelV(Vector2 position, Color color) <void>;
+pub extern fn DrawLine(int32 startPosX, int32 startPosY, int32 endPosX, int32 endPosY, Color color) <void>;
+pub extern fn DrawLineV(Vector2 startPos, Vector2 endPos, Color color) <void>;
+pub extern fn DrawLineEx(Vector2 startPos, Vector2 endPos, float32 thick, Color color) <void>;
+pub extern fn DrawLineBezier(Vector2 startPos, Vector2 endPos, float32 thick, Color color) <void>;
+pub extern fn DrawCircle(int32 centerX, int32 centerY, float32 radius, Color color) <void>;
+pub extern fn DrawCircleSector(Vector2 center, float32 radius, float32 startAngle, float32 endAngle, int32 segments, Color color) <void>;
+pub extern fn DrawCircleSectorLines(Vector2 center, float32 radius, float32 startAngle, float32 endAngle, int32 segments, Color color) <void>;
+pub extern fn DrawCircleGradient(int32 centerX, int32 centerY, float32 radius, Color inner, Color outer) <void>;
+pub extern fn DrawCircleV(Vector2 center, float32 radius, Color color) <void>;
+pub extern fn DrawCircleLines(int32 centerX, int32 centerY, float32 radius, Color color) <void>;
+pub extern fn DrawCircleLinesV(Vector2 center, float32 radius, Color color) <void>;
+pub extern fn DrawEllipse(int32 centerX, int32 centerY, float32 radiusH, float32 radiusV, Color color) <void>;
+pub extern fn DrawEllipseLines(int32 centerX, int32 centerY, float32 radiusH, float32 radiusV, Color color) <void>;
+pub extern fn DrawRing(Vector2 center, float32 innerRadius, float32 outerRadius, float32 startAngle, float32 endAngle, int32 segments, Color color) <void>;
+pub extern fn DrawRingLines(Vector2 center, float32 innerRadius, float32 outerRadius, float32 startAngle, float32 endAngle, int32 segments, Color color) <void>;
+pub extern fn DrawRectangle(int32 posX, int32 posY, int32 width, int32 height, Color color) <void>;
+pub extern fn DrawRectangleV(Vector2 position, Vector2 size, Color color) <void>;
+pub extern fn DrawRectangleRec(Rectangle rec, Color color) <void>;
+pub extern fn DrawRectanglePro(Rectangle rec, Vector2 origin, float32 rotation, Color color) <void>;
+pub extern fn DrawRectangleGradientV(int32 posX, int32 posY, int32 width, int32 height, Color top, Color bottom) <void>;
+pub extern fn DrawRectangleGradientH(int32 posX, int32 posY, int32 width, int32 height, Color left, Color right) <void>;
+pub extern fn DrawRectangleLines(int32 posX, int32 posY, int32 width, int32 height, Color color) <void>;
+pub extern fn DrawRectangleLinesEx(Rectangle rec, float32 lineThick, Color color) <void>;
+pub extern fn DrawRectangleRounded(Rectangle rec, float32 roundness, int32 segments, Color color) <void>;
+pub extern fn DrawRectangleRoundedLines(Rectangle rec, float32 roundness, int32 segments, Color color) <void>;
+pub extern fn DrawRectangleRoundedLinesEx(Rectangle rec, float32 roundness, int32 segments, float32 lineThick, Color color) <void>;
+pub extern fn DrawTriangle(Vector2 v1, Vector2 v2, Vector2 v3, Color color) <void>;
+pub extern fn DrawTriangleLines(Vector2 v1, Vector2 v2, Vector2 v3, Color color) <void>;
+pub extern fn DrawPoly(Vector2 center, int32 sides, float32 radius, float32 rotation, Color color) <void>;
+pub extern fn DrawPolyLines(Vector2 center, int32 sides, float32 radius, float32 rotation, Color color) <void>;
+pub extern fn DrawPolyLinesEx(Vector2 center, int32 sides, float32 radius, float32 rotation, float32 lineThick, Color color) <void>;
+
+pub extern fn CheckCollisionRecs(Rectangle rec1, Rectangle rec2) <bool>;
+pub extern fn CheckCollisionCircles(Vector2 center1, float32 radius1, Vector2 center2, float32 radius2) <bool>;
+pub extern fn CheckCollisionCircleRec(Vector2 center, float32 radius, Rectangle rec) <bool>;
+pub extern fn CheckCollisionPointRec(Vector2 point, Rectangle rec) <bool>;
+pub extern fn CheckCollisionPointCircle(Vector2 point, Vector2 center, float32 radius) <bool>;
+pub extern fn CheckCollisionPointTriangle(Vector2 point, Vector2 p1, Vector2 p2, Vector2 p3) <bool>;
+pub extern fn GetCollisionRec(Rectangle rec1, Rectangle rec2) <Rectangle>;
+
+// ============================================================
+// rtextures, Image (CPU-side)
+// ============================================================
+
+pub extern fn LoadImage(string fileName) <Image>;
+pub extern fn LoadImageFromMemory(string fileType, void* fileData, int32 dataSize) <Image>;
+pub extern fn IsImageValid(Image image) <bool>;
+pub extern fn UnloadImage(Image image) <void>;
+pub extern fn ExportImage(Image image, string fileName) <bool>;
+pub extern fn GenImageColor(int32 width, int32 height, Color color) <Image>;
+pub extern fn GenImageGradientLinear(int32 width, int32 height, int32 direction, Color start, Color end) <Image>;
+pub extern fn GenImageGradientRadial(int32 width, int32 height, float32 density, Color inner, Color outer) <Image>;
+pub extern fn GenImageChecked(int32 width, int32 height, int32 checksX, int32 checksY, Color col1, Color col2) <Image>;
+pub extern fn GenImageWhiteNoise(int32 width, int32 height, float32 factor) <Image>;
+pub extern fn ImageCopy(Image image) <Image>;
+pub extern fn ImageFromImage(Image image, Rectangle rec) <Image>;
+pub extern fn ImageFormat(Image* image, int32 newFormat) <void>;
+pub extern fn ImageToPOT(Image* image, Color fill) <void>;
+pub extern fn ImageCrop(Image* image, Rectangle crop) <void>;
+pub extern fn ImageAlphaCrop(Image* image, float32 threshold) <void>;
+pub extern fn ImageAlphaClear(Image* image, Color color, float32 threshold) <void>;
+pub extern fn ImageAlphaMask(Image* image, Image alphaMask) <void>;
+pub extern fn ImageAlphaPremultiply(Image* image) <void>;
+pub extern fn ImageBlurGaussian(Image* image, int32 blurSize) <void>;
+pub extern fn ImageResize(Image* image, int32 newWidth, int32 newHeight) <void>;
+pub extern fn ImageResizeNN(Image* image, int32 newWidth, int32 newHeight) <void>;
+pub extern fn ImageResizeCanvas(Image* image, int32 newWidth, int32 newHeight, int32 offsetX, int32 offsetY, Color fill) <void>;
+pub extern fn ImageMipmaps(Image* image) <void>;
+pub extern fn ImageFlipVertical(Image* image) <void>;
+pub extern fn ImageFlipHorizontal(Image* image) <void>;
+pub extern fn ImageRotate(Image* image, int32 degrees) <void>;
+pub extern fn ImageRotateCW(Image* image) <void>;
+pub extern fn ImageRotateCCW(Image* image) <void>;
+pub extern fn ImageColorTint(Image* image, Color color) <void>;
+pub extern fn ImageColorInvert(Image* image) <void>;
+pub extern fn ImageColorGrayscale(Image* image) <void>;
+pub extern fn ImageColorContrast(Image* image, float32 contrast) <void>;
+pub extern fn ImageColorBrightness(Image* image, int32 brightness) <void>;
+pub extern fn ImageColorReplace(Image* image, Color color, Color replace) <void>;
+pub extern fn GetImageAlphaBorder(Image image, float32 threshold) <Rectangle>;
+pub extern fn GetImageColor(Image image, int32 x, int32 y) <Color>;
+pub extern fn ImageClearBackground(Image* dst, Color color) <void>;
+pub extern fn ImageDrawPixel(Image* dst, int32 posX, int32 posY, Color color) <void>;
+pub extern fn ImageDrawLine(Image* dst, int32 startPosX, int32 startPosY, int32 endPosX, int32 endPosY, Color color) <void>;
+pub extern fn ImageDrawCircle(Image* dst, int32 centerX, int32 centerY, int32 radius, Color color) <void>;
+pub extern fn ImageDrawRectangle(Image* dst, int32 posX, int32 posY, int32 width, int32 height, Color color) <void>;
+pub extern fn ImageDrawRectangleRec(Image* dst, Rectangle rec, Color color) <void>;
+pub extern fn ImageDrawText(Image* dst, string text, int32 posX, int32 posY, int32 fontSize, Color color) <void>;
+pub extern fn ImageDraw(Image* dst, Image src, Rectangle srcRec, Rectangle dstRec, Color tint) <void>;
+
+// ============================================================
+// rtextures, Texture (GPU-side)
+// ============================================================
+
+pub extern fn LoadTexture(string fileName) <Texture>;
+pub extern fn LoadTextureFromImage(Image image) <Texture>;
+pub extern fn LoadRenderTexture(int32 width, int32 height) <RenderTexture>;
+pub extern fn IsTextureValid(Texture texture) <bool>;
+pub extern fn UnloadTexture(Texture texture) <void>;
+pub extern fn IsRenderTextureValid(RenderTexture target) <bool>;
+pub extern fn UnloadRenderTexture(RenderTexture target) <void>;
+pub extern fn UpdateTexture(Texture texture, void* pixels) <void>;
+pub extern fn GenTextureMipmaps(Texture* texture) <void>;
+pub extern fn SetTextureFilter(Texture texture, int32 filter) <void>;
+pub extern fn SetTextureWrap(Texture texture, int32 wrap) <void>;
+pub extern fn DrawTexture(Texture texture, int32 posX, int32 posY, Color tint) <void>;
+pub extern fn DrawTextureV(Texture texture, Vector2 position, Color tint) <void>;
+pub extern fn DrawTextureEx(Texture texture, Vector2 position, float32 rotation, float32 scale, Color tint) <void>;
+pub extern fn DrawTextureRec(Texture texture, Rectangle source, Vector2 position, Color tint) <void>;
+pub extern fn DrawTexturePro(Texture texture, Rectangle source, Rectangle dest, Vector2 origin, float32 rotation, Color tint) <void>;
+pub extern fn DrawTextureNPatch(Texture texture, NPatchInfo nPatchInfo, Rectangle dest, Vector2 origin, float32 rotation, Color tint) <void>;
+
+pub extern fn Fade(Color color, float32 alpha) <Color>;
+pub extern fn ColorToInt(Color color) <int32>;
+pub extern fn ColorNormalize(Color color) <Vector4>;
+pub extern fn ColorFromNormalized(Vector4 normalized) <Color>;
+pub extern fn ColorToHSV(Color color) <Vector3>;
+pub extern fn ColorFromHSV(float32 hue, float32 saturation, float32 value) <Color>;
+pub extern fn ColorTint(Color color, Color tint) <Color>;
+pub extern fn ColorBrightness(Color color, float32 factor) <Color>;
+pub extern fn ColorContrast(Color color, float32 contrast) <Color>;
+pub extern fn ColorAlpha(Color color, float32 alpha) <Color>;
+pub extern fn ColorAlphaBlend(Color dst, Color src, Color tint) <Color>;
+pub extern fn ColorLerp(Color color1, Color color2, float32 factor) <Color>;
+pub extern fn GetColor(uint32 hexValue) <Color>;
+
+// ============================================================
+// rtext, Font & Text
+// ============================================================
+
+pub extern fn GetFontDefault() <Font>;
+pub extern fn LoadFont(string fileName) <Font>;
+pub extern fn LoadFontEx(string fileName, int32 fontSize, void* codepoints, int32 codepointCount) <Font>;
+pub extern fn IsFontValid(Font font) <bool>;
+pub extern fn UnloadFont(Font font) <void>;
+pub extern fn DrawFPS(int32 posX, int32 posY) <void>;
+pub extern fn DrawText(string text, int32 posX, int32 posY, int32 fontSize, Color color) <void>;
+pub extern fn DrawTextEx(Font font, string text, Vector2 position, float32 fontSize, float32 spacing, Color tint) <void>;
+pub extern fn DrawTextPro(Font font, string text, Vector2 position, Vector2 origin, float32 rotation, float32 fontSize, float32 spacing, Color tint) <void>;
+pub extern fn SetTextLineSpacing(int32 spacing) <void>;
+pub extern fn MeasureText(string text, int32 fontSize) <int32>;
+pub extern fn MeasureTextEx(Font font, string text, float32 fontSize, float32 spacing) <Vector2>;
+
+// ============================================================
+// rmodels, 3D basic shapes
+// ============================================================
+
+pub extern fn DrawLine3D(Vector3 startPos, Vector3 endPos, Color color) <void>;
+pub extern fn DrawPoint3D(Vector3 position, Color color) <void>;
+pub extern fn DrawCircle3D(Vector3 center, float32 radius, Vector3 rotationAxis, float32 rotationAngle, Color color) <void>;
+pub extern fn DrawTriangle3D(Vector3 v1, Vector3 v2, Vector3 v3, Color color) <void>;
+pub extern fn DrawCube(Vector3 position, float32 width, float32 height, float32 length, Color color) <void>;
+pub extern fn DrawCubeV(Vector3 position, Vector3 size, Color color) <void>;
+pub extern fn DrawCubeWires(Vector3 position, float32 width, float32 height, float32 length, Color color) <void>;
+pub extern fn DrawCubeWiresV(Vector3 position, Vector3 size, Color color) <void>;
+pub extern fn DrawSphere(Vector3 centerPos, float32 radius, Color color) <void>;
+pub extern fn DrawSphereEx(Vector3 centerPos, float32 radius, int32 rings, int32 slices, Color color) <void>;
+pub extern fn DrawSphereWires(Vector3 centerPos, float32 radius, int32 rings, int32 slices, Color color) <void>;
+pub extern fn DrawCylinder(Vector3 position, float32 radiusTop, float32 radiusBottom, float32 height, int32 slices, Color color) <void>;
+pub extern fn DrawCylinderEx(Vector3 startPos, Vector3 endPos, float32 startRadius, float32 endRadius, int32 sides, Color color) <void>;
+pub extern fn DrawCylinderWires(Vector3 position, float32 radiusTop, float32 radiusBottom, float32 height, int32 slices, Color color) <void>;
+pub extern fn DrawCapsule(Vector3 startPos, Vector3 endPos, float32 radius, int32 slices, int32 rings, Color color) <void>;
+pub extern fn DrawCapsuleWires(Vector3 startPos, Vector3 endPos, float32 radius, int32 slices, int32 rings, Color color) <void>;
+pub extern fn DrawPlane(Vector3 centerPos, Vector2 size, Color color) <void>;
+pub extern fn DrawRay(Ray ray, Color color) <void>;
+pub extern fn DrawGrid(int32 slices, float32 spacing) <void>;
+pub extern fn DrawBoundingBox(BoundingBox box, Color color) <void>;
+
+pub extern fn CheckCollisionSpheres(Vector3 center1, float32 radius1, Vector3 center2, float32 radius2) <bool>;
+pub extern fn CheckCollisionBoxes(BoundingBox box1, BoundingBox box2) <bool>;
+pub extern fn CheckCollisionBoxSphere(BoundingBox box, Vector3 center, float32 radius) <bool>;
+
+pub extern fn GetScreenToWorldRay(Vector2 position, Camera3D camera) <Ray>;
+pub extern fn GetWorldToScreen(Vector3 position, Camera3D camera) <Vector2>;
+pub extern fn GetWorldToScreen2D(Vector2 position, Camera2D camera) <Vector2>;
+pub extern fn GetScreenToWorld2D(Vector2 position, Camera2D camera) <Vector2>;
+
+// ============================================================
+// raudio, Device
+// ============================================================
+
+pub extern fn InitAudioDevice() <void>;
+pub extern fn CloseAudioDevice() <void>;
+pub extern fn IsAudioDeviceReady() <bool>;
+pub extern fn SetMasterVolume(float32 volume) <void>;
+pub extern fn GetMasterVolume() <float32>;
+
+// ============================================================
+// raudio, Wave
+// ============================================================
+
+pub extern fn LoadWave(string fileName) <Wave>;
+pub extern fn IsWaveValid(Wave wave) <bool>;
+pub extern fn UnloadWave(Wave wave) <void>;
+pub extern fn ExportWave(Wave wave, string fileName) <bool>;
+pub extern fn WaveCopy(Wave wave) <Wave>;
+pub extern fn WaveCrop(Wave* wave, int32 initFrame, int32 finalFrame) <void>;
+pub extern fn WaveFormat(Wave* wave, int32 sampleRate, int32 sampleSize, int32 channels) <void>;
+
+// ============================================================
+// raudio, Sound
+// ============================================================
+
+pub extern fn LoadSound(string fileName) <Sound>;
+pub extern fn LoadSoundFromWave(Wave wave) <Sound>;
+pub extern fn IsSoundValid(Sound sound) <bool>;
+pub extern fn UnloadSound(Sound sound) <void>;
+pub extern fn UpdateSound(Sound sound, void* data, int32 sampleCount) <void>;
+pub extern fn PlaySound(Sound sound) <void>;
+pub extern fn StopSound(Sound sound) <void>;
+pub extern fn PauseSound(Sound sound) <void>;
+pub extern fn ResumeSound(Sound sound) <void>;
+pub extern fn IsSoundPlaying(Sound sound) <bool>;
+pub extern fn SetSoundVolume(Sound sound, float32 volume) <void>;
+pub extern fn SetSoundPitch(Sound sound, float32 pitch) <void>;
+pub extern fn SetSoundPan(Sound sound, float32 pan) <void>;
+
+// ============================================================
+// raudio, Music (streaming)
+// ============================================================
+
+pub extern fn LoadMusicStream(string fileName) <Music>;
+pub extern fn IsMusicValid(Music music) <bool>;
+pub extern fn UnloadMusicStream(Music music) <void>;
+pub extern fn PlayMusicStream(Music music) <void>;
+pub extern fn IsMusicStreamPlaying(Music music) <bool>;
+pub extern fn UpdateMusicStream(Music music) <void>;
+pub extern fn StopMusicStream(Music music) <void>;
+pub extern fn PauseMusicStream(Music music) <void>;
+pub extern fn ResumeMusicStream(Music music) <void>;
+pub extern fn SeekMusicStream(Music music, float32 position) <void>;
+pub extern fn SetMusicVolume(Music music, float32 volume) <void>;
+pub extern fn SetMusicPitch(Music music, float32 pitch) <void>;
+pub extern fn SetMusicPan(Music music, float32 pan) <void>;
+pub extern fn GetMusicTimeLength(Music music) <float32>;
+pub extern fn GetMusicTimePlayed(Music music) <float32>;
+
+// ============================================================
+// Color helpers
+// ============================================================
+
+fn ColorRGBA(uint8 r, uint8 g, uint8 b, uint8 a) <int32> {
+    return ((int32) a << 24) | ((int32) b << 16) | ((int32) g << 8) | (int32) r;
+}
+
+fn MakeColor(uint8 r, uint8 g, uint8 b, uint8 a) <Color> {
+    Color c;
+    c.r = r;
+    c.g = g;
+    c.b = b;
+    c.a = a;
+    return c;
+}
+
+pin nomd Color LIGHTGRAY  = MakeColor(200, 200, 200, 255);
+pin nomd Color GRAY       = MakeColor(130, 130, 130, 255);
+pin nomd Color DARKGRAY   = MakeColor(80,  80,  80,  255);
+pin nomd Color YELLOW     = MakeColor(253, 249, 0,   255);
+pin nomd Color GOLD       = MakeColor(255, 203, 0,   255);
+pin nomd Color ORANGE     = MakeColor(255, 161, 0,   255);
+pin nomd Color PINK       = MakeColor(255, 109, 194, 255);
+pin nomd Color RED        = MakeColor(230, 41,  55,  255);
+pin nomd Color MAROON     = MakeColor(190, 33,  55,  255);
+pin nomd Color GREEN      = MakeColor(0,   228, 48,  255);
+pin nomd Color LIME       = MakeColor(0,   158, 47,  255);
+pin nomd Color DARKGREEN  = MakeColor(0,   117, 44,  255);
+pin nomd Color SKYBLUE    = MakeColor(102, 191, 255, 255);
+pin nomd Color BLUE       = MakeColor(0,   121, 241, 255);
+pin nomd Color DARKBLUE   = MakeColor(0,   82,  172, 255);
+pin nomd Color PURPLE     = MakeColor(200, 122, 255, 255);
+pin nomd Color VIOLET     = MakeColor(135, 60,  190, 255);
+pin nomd Color DARKPURPLE = MakeColor(112, 31,  126, 255);
+pin nomd Color BEIGE      = MakeColor(211, 176, 131, 255);
+pin nomd Color BROWN      = MakeColor(127, 106, 79,  255);
+pin nomd Color DARKBROWN  = MakeColor(76,  63,  47,  255);
+pin nomd Color WHITE      = MakeColor(255, 255, 255, 255);
+pin nomd Color BLACK      = MakeColor(0,   0,   0,   255);
+pin nomd Color BLANK      = MakeColor(0,   0,   0,   0);
+pin nomd Color MAGENTA    = MakeColor(255, 0,   255, 255);
+pin nomd Color RAYWHITE   = MakeColor(245, 245, 245, 255);
+
+// ============================================================
+// Constants (use as int32 literals)
+// ============================================================
+//
+// --- Keys ---
+// KEY_NULL=0  KEY_SPACE=32  KEY_APOSTROPHE=39  KEY_COMMA=44
+// KEY_MINUS=45  KEY_PERIOD=46  KEY_SLASH=47
+// KEY_ZERO=48 .. KEY_NINE=57   KEY_SEMICOLON=59  KEY_EQUAL=61
+// KEY_A=65 .. KEY_Z=90
+// KEY_LEFT_BRACKET=91  KEY_BACKSLASH=92  KEY_RIGHT_BRACKET=93  KEY_GRAVE=96
+// KEY_ESCAPE=256  KEY_ENTER=257  KEY_TAB=258  KEY_BACKSPACE=259
+// KEY_INSERT=260  KEY_DELETE=261
+// KEY_RIGHT=262  KEY_LEFT=263  KEY_DOWN=264  KEY_UP=265
+// KEY_PAGE_UP=266  KEY_PAGE_DOWN=267  KEY_HOME=268  KEY_END=269
+// KEY_CAPS_LOCK=280  KEY_SCROLL_LOCK=281  KEY_NUM_LOCK=282  KEY_PRINT_SCREEN=283
+// KEY_F1=290 .. KEY_F12=301
+// KEY_KP_0=320 .. KEY_KP_9=329  KEY_KP_DECIMAL=330
+// KEY_KP_DIVIDE=331  KEY_KP_MULTIPLY=332  KEY_KP_SUBTRACT=333
+// KEY_KP_ADD=334  KEY_KP_ENTER=335  KEY_KP_EQUAL=336
+// KEY_LEFT_SHIFT=340  KEY_LEFT_CONTROL=341  KEY_LEFT_ALT=342
+// KEY_LEFT_SUPER=343  KEY_RIGHT_SHIFT=344  KEY_RIGHT_CONTROL=345
+// KEY_RIGHT_ALT=346  KEY_RIGHT_SUPER=347  KEY_MENU=348
+//
+// --- Mouse buttons ---
+// MOUSE_BUTTON_LEFT=0  MOUSE_BUTTON_RIGHT=1  MOUSE_BUTTON_MIDDLE=2
+// MOUSE_BUTTON_SIDE=3  MOUSE_BUTTON_EXTRA=4
+// MOUSE_BUTTON_FORWARD=5  MOUSE_BUTTON_BACK=6
+//
+// --- Mouse cursors ---
+// MOUSE_CURSOR_DEFAULT=0  MOUSE_CURSOR_ARROW=1  MOUSE_CURSOR_IBEAM=2
+// MOUSE_CURSOR_CROSSHAIR=3  MOUSE_CURSOR_POINTING_HAND=4
+// MOUSE_CURSOR_RESIZE_EW=5  MOUSE_CURSOR_RESIZE_NS=6
+// MOUSE_CURSOR_RESIZE_NWSE=7  MOUSE_CURSOR_RESIZE_NESW=8
+// MOUSE_CURSOR_RESIZE_ALL=9  MOUSE_CURSOR_NOT_ALLOWED=10
+//
+// --- Gamepad buttons ---
+// GAMEPAD_BUTTON_UNKNOWN=0
+// GAMEPAD_BUTTON_LEFT_FACE_UP=1  DOWN=2  LEFT=3  RIGHT=4
+// GAMEPAD_BUTTON_RIGHT_FACE_UP=5  DOWN=6  LEFT=7  RIGHT=8
+// GAMEPAD_BUTTON_LEFT_TRIGGER_1=9  LEFT_TRIGGER_2=10
+// GAMEPAD_BUTTON_RIGHT_TRIGGER_1=11  RIGHT_TRIGGER_2=12
+// GAMEPAD_BUTTON_MIDDLE_LEFT=13  MIDDLE=14  MIDDLE_RIGHT=15
+// GAMEPAD_BUTTON_LEFT_THUMB=16  RIGHT_THUMB=17
+//
+// --- Gamepad axes ---
+// GAMEPAD_AXIS_LEFT_X=0  GAMEPAD_AXIS_LEFT_Y=1
+// GAMEPAD_AXIS_RIGHT_X=2  GAMEPAD_AXIS_RIGHT_Y=3
+// GAMEPAD_AXIS_LEFT_TRIGGER=4  GAMEPAD_AXIS_RIGHT_TRIGGER=5
+//
+// --- Camera modes ---
+// CAMERA_CUSTOM=0  CAMERA_FREE=1  CAMERA_ORBITAL=2
+// CAMERA_FIRST_PERSON=3  CAMERA_THIRD_PERSON=4
+//
+// --- Camera projection ---
+// CAMERA_PERSPECTIVE=0  CAMERA_ORTHOGRAPHIC=1
+//
+// --- Texture filters ---
+// TEXTURE_FILTER_POINT=0  TEXTURE_FILTER_BILINEAR=1  TEXTURE_FILTER_TRILINEAR=2
+// TEXTURE_FILTER_ANISOTROPIC_4X=3  TEXTURE_FILTER_ANISOTROPIC_8X=4
+// TEXTURE_FILTER_ANISOTROPIC_16X=5
+//
+// --- Texture wrap ---
+// TEXTURE_WRAP_REPEAT=0  TEXTURE_WRAP_CLAMP=1
+// TEXTURE_WRAP_MIRROR_REPEAT=2  TEXTURE_WRAP_MIRROR_CLAMP=3
+//
+// --- Pixel formats ---
+// PIXELFORMAT_UNCOMPRESSED_GRAYSCALE=1  PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA=2
+// PIXELFORMAT_UNCOMPRESSED_R5G6B5=3     PIXELFORMAT_UNCOMPRESSED_R8G8B8=4
+// PIXELFORMAT_UNCOMPRESSED_R5G5B5A1=5   PIXELFORMAT_UNCOMPRESSED_R4G4B4A4=6
+// PIXELFORMAT_UNCOMPRESSED_R8G8B8A8=7   PIXELFORMAT_UNCOMPRESSED_R32=8
+// PIXELFORMAT_UNCOMPRESSED_R32G32B32=9  PIXELFORMAT_UNCOMPRESSED_R32G32B32A32=10
+//
+// --- Config flags (OR them together for SetConfigFlags) ---
+// FLAG_VSYNC_HINT=64        FLAG_FULLSCREEN_MODE=2     FLAG_WINDOW_RESIZABLE=4
+// FLAG_WINDOW_UNDECORATED=8 FLAG_WINDOW_HIDDEN=128     FLAG_WINDOW_MINIMIZED=512
+// FLAG_WINDOW_MAXIMIZED=1024 FLAG_WINDOW_UNFOCUSED=2048 FLAG_WINDOW_TOPMOST=4096
+// FLAG_WINDOW_ALWAYS_RUN=256 FLAG_WINDOW_TRANSPARENT=16 FLAG_WINDOW_HIGHDPI=8192
+// FLAG_MSAA_4X_HINT=32
+//
+// --- Log levels ---
+// LOG_ALL=0  LOG_TRACE=1  LOG_DEBUG=2  LOG_INFO=3
+// LOG_WARNING=4  LOG_ERROR=5  LOG_FATAL=6  LOG_NONE=7
+//
+// --- NPatch layout ---
+// NPATCH_NINE_PATCH=0  NPATCH_THREE_PATCH_VERTICAL=1  NPATCH_THREE_PATCH_HORIZONTAL=2
