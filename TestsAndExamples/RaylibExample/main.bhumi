@@ -1,7 +1,7 @@
 import CRaylib, C_std;
 
 fn main() <int> {
-    Color red = Color { r(255); g(50); b(255); a(255); }
+    Color red = Color { r(255); g(50); b(255); a(128); }
 
     float32 pos_x = 0.0;
     float32 pos_y = 0.0;
@@ -59,9 +59,9 @@ fn main() <int> {
         }
 
         BeginDrawing();
-        ClearBackground(/*ColorRGBA(50, 50, 50, 50)*/red);
-        DrawText("Welcome to DVD on Bhumi", 80, 200, 48, 0xFF000000);
-        DrawRectangle(ftoint(pos_x), ftoint(pos_y), rect_size, rect_size, ColorRGBA(r, g, b, 255));
+        ClearBackground(red);
+        DrawText("Welcome to DVD on Bhumi", 80, 200, 48, Color { r(0); g(0); b(0); a(255); });
+        DrawRectangle((int32) pos_x, (int32) pos_y, rect_size, rect_size, Color { r(r); g(g); b(b); a(255); });
         EndDrawing();
     }
 
