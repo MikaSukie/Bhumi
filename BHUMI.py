@@ -839,11 +839,13 @@ def emit_cast_value(
             return tmp
     if src_llvm.startswith("i") and not src_llvm.endswith("*") and dst_llvm in ("double", "float"):
         tmp = new_tmp()
-        out.append(f"  {tmp} = sitofp {src_llvm} {val} to {dst_llvm}")
+        conv = "uitofp" if is_unsigned_int_type(src_t) else "sitofp"
+        out.append(f"  {tmp} = {conv} {src_llvm} {val} to {dst_llvm}")
         return tmp
     if dst_llvm.startswith("i") and not dst_llvm.endswith("*") and (src_llvm == "double" or src_llvm == "float"):
         tmp = new_tmp()
-        out.append(f"  {tmp} = fptosi {src_llvm} {val} to {dst_llvm}")
+        conv = "fptoui" if is_unsigned_int_type(dst_t) else "fptosi"
+        out.append(f"  {tmp} = {conv} {src_llvm} {val} to {dst_llvm}")
         return tmp
     if (src_llvm == "double" and dst_llvm == "float") or (src_llvm == "float" and dst_llvm == "double"):
         tmp = new_tmp()
@@ -2618,17 +2620,20 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 else:
                     out.append(f"  {cast_tmp} = sext {src_llvm} {val} to {dst_llvm}")
             return cast_tmp
-        if src_llvm.startswith("i") and dst_llvm == "double":
+        if src_llvm.startswith("i") and not src_llvm.endswith("*") and dst_llvm == "double":
             cast_tmp = new_tmp()
-            out.append(f"  {cast_tmp} = sitofp {src_llvm} {val} to double")
+            conv = "uitofp" if is_unsigned_int_type(src_t) else "sitofp"
+            out.append(f"  {cast_tmp} = {conv} {src_llvm} {val} to double")
             return cast_tmp
-        if src_llvm.startswith("i") and dst_llvm == "float":
+        if src_llvm.startswith("i") and not src_llvm.endswith("*") and dst_llvm == "float":
             cast_tmp = new_tmp()
-            out.append(f"  {cast_tmp} = sitofp {src_llvm} {val} to float")
+            conv = "uitofp" if is_unsigned_int_type(src_t) else "sitofp"
+            out.append(f"  {cast_tmp} = {conv} {src_llvm} {val} to float")
             return cast_tmp
-        if src_llvm == "double" and dst_llvm.startswith("i"):
+        if (src_llvm == "double" or src_llvm == "float") and dst_llvm.startswith("i") and not dst_llvm.endswith("*"):
             cast_tmp = new_tmp()
-            out.append(f"  {cast_tmp} = fptosi double {val} to {dst_llvm}")
+            conv = "fptoui" if is_unsigned_int_type(dst_t) else "fptosi"
+            out.append(f"  {cast_tmp} = {conv} {src_llvm} {val} to {dst_llvm}")
             return cast_tmp
         if src_llvm == "double" and dst_llvm == "float":
             cast_tmp = new_tmp()
