@@ -1118,6 +1118,12 @@ class GlobalVar:
 class ForgetStmt(Stmt):
     varname: str
 @dataclass
+class TakeStmt(Stmt):
+    varname: str
+@dataclass
+class TakeExpr(Expr):
+    varname: str
+@dataclass
 class UnaryDeref(Expr):
     ptr: Expr
 @dataclass
@@ -1844,6 +1850,11 @@ class Parser:
             return BreakStmt()
         if t.kind == "RETURN":
             return self.parse_return()
+        if t.kind == "TAKE":
+            self.bump()
+            name_tok = self.expect("IDENT")
+            self.expect("SEMI")
+            return TakeStmt(name_tok.value)
         return self.parse_expr_stmt()
     def parse_typeswitch(self) -> TypeSwitch:
         self.expect("TYPESWITCH")
@@ -2179,6 +2190,15 @@ class Parser:
             self.bump()
             inner = self.parse_primary()
             return AwaitExpr(inner)
+        if self.peek().kind == "TAKE":
+            take_tok = self.bump()
+            if self.peek().kind != "IDENT":
+                bhumi_report_error(
+                    take_tok.line, take_tok.col,
+                    "Expected variable name after 'take'",
+                )
+            name_tok = self.bump()
+            return TakeExpr(name_tok.value)
         if self.peek().kind == "STAR":
             self.bump()
             inner = self.parse_primary()
@@ -2551,6 +2571,34 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         else:
             cr.pop("_deferred_frees", None)
     global string_constants
+    if isinstance(expr, TakeExpr):
+        _te_sym = symbol_table.lookup(expr.varname)
+        if _te_sym is None:
+            bhumi_report_error(
+                getattr(expr, "lineno", None),
+                getattr(expr, "col", None),
+                f"take: undefined variable '{expr.varname}'",
+            )
+        _te_llvm, _te_ir = _te_sym
+        _te_addr = f"@{_te_ir}" if _te_ir.startswith("@") else f"%{_te_ir}_addr"
+        _te_val = new_tmp()
+        out.append(f"  {_te_val} = load {_te_llvm}, {_te_llvm}* {_te_addr}")
+        out.append(f"  store {_te_llvm} {zero_const_for_llvm(_te_llvm)}, {_te_llvm}* {_te_addr}")
+        _te_bep = binding_enum_payload.get(_te_ir)
+        if _te_bep is not None:
+            _, _, _, _te_bep_pty, _te_bep_slot = _te_bep
+            out.append(f"  store {_te_bep_pty} null, {_te_bep_pty}* {_te_bep_slot}")
+        owned_vars.discard(expr.varname)
+        if expr.varname in crumb_runtime:
+            crumb_runtime[expr.varname]["owned"] = False
+        for _te_ctx in scope_drop_stack:
+            _te_ctx.get("body_decl_names", set()).discard(expr.varname)
+            _te_ctx["extra_ir_owned"] = [
+                (_ir_nm, _ir_ty, _ir_src)
+                for _ir_nm, _ir_ty, _ir_src in _te_ctx.get("extra_ir_owned", [])
+                if _ir_src != _te_ir
+            ]
+        return _te_val
     if isinstance(expr, Cast):
         dst_t = expr.typ
         dst_llvm = llvm_ty_of(dst_t)
@@ -4071,6 +4119,43 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         out.append(f"  call void @free(i8* {cast_tmp})")
                 except Exception:
                     pass
+            _tp_fn_void = _func_name_map.get(call_target)
+            if _tp_fn_void is None and "__mono__" in call_target:
+                _tp_fn_void = _func_name_map.get(call_target.split("__mono__")[0])
+            _tp_set_void = getattr(_tp_fn_void, "take_params", None) or set()
+            for _tp_i in _tp_set_void:
+                if _tp_i < len(expr.args):
+                    _tp_arg = expr.args[_tp_i]
+                    if isinstance(_tp_arg, Var) and _tp_arg.name in owned_vars:
+                        _tp_sym = symbol_table.lookup(_tp_arg.name)
+                        if _tp_sym is not None:
+                            _tp_llvm, _tp_ir = _tp_sym
+                            _tp_addr = (
+                                f"@{_tp_ir}" if _tp_ir.startswith("@")
+                                else f"%{_tp_ir}_addr"
+                            )
+                            out.append(
+                                f"  store {_tp_llvm} {zero_const_for_llvm(_tp_llvm)},"
+                                f" {_tp_llvm}* {_tp_addr}"
+                            )
+                            _tp_bep = binding_enum_payload.get(_tp_ir)
+                            if _tp_bep is not None:
+                                _, _, _, _tp_bep_pty, _tp_bep_slot = _tp_bep
+                                out.append(
+                                    f"  store {_tp_bep_pty} null,"
+                                    f" {_tp_bep_pty}* {_tp_bep_slot}"
+                                )
+                        owned_vars.discard(_tp_arg.name)
+                        if _tp_arg.name in crumb_runtime:
+                            crumb_runtime[_tp_arg.name]["owned"] = False
+                        for _tp_ctx in scope_drop_stack:
+                            _tp_ctx.get("body_decl_names", set()).discard(_tp_arg.name)
+                            _tp_ctx["extra_ir_owned"] = [
+                                (_ir_nm, _ir_ty, _ir_src)
+                                for _ir_nm, _ir_ty, _ir_src
+                                in _tp_ctx.get("extra_ir_owned", [])
+                                if _tp_sym is None or _ir_src != _tp_sym[1]
+                            ]
             return ""
         else:
             tmp2 = new_tmp()
@@ -4104,6 +4189,43 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 _maybe_flush_deferred(arg_expr, arg_val)
                 if infer_type(arg_expr) == "string":
                     _emit_free_if_temp(arg_expr, arg_val)
+            _tp_fn_nv = _func_name_map.get(call_target)
+            if _tp_fn_nv is None and "__mono__" in call_target:
+                _tp_fn_nv = _func_name_map.get(call_target.split("__mono__")[0])
+            _tp_set_nv = getattr(_tp_fn_nv, "take_params", None) or set()
+            for _tp_i in _tp_set_nv:
+                if _tp_i < len(expr.args):
+                    _tp_arg = expr.args[_tp_i]
+                    if isinstance(_tp_arg, Var) and _tp_arg.name in owned_vars:
+                        _tp_sym = symbol_table.lookup(_tp_arg.name)
+                        if _tp_sym is not None:
+                            _tp_llvm, _tp_ir = _tp_sym
+                            _tp_addr = (
+                                f"@{_tp_ir}" if _tp_ir.startswith("@")
+                                else f"%{_tp_ir}_addr"
+                            )
+                            out.append(
+                                f"  store {_tp_llvm} {zero_const_for_llvm(_tp_llvm)},"
+                                f" {_tp_llvm}* {_tp_addr}"
+                            )
+                            _tp_bep = binding_enum_payload.get(_tp_ir)
+                            if _tp_bep is not None:
+                                _, _, _, _tp_bep_pty, _tp_bep_slot = _tp_bep
+                                out.append(
+                                    f"  store {_tp_bep_pty} null,"
+                                    f" {_tp_bep_pty}* {_tp_bep_slot}"
+                                )
+                        owned_vars.discard(_tp_arg.name)
+                        if _tp_arg.name in crumb_runtime:
+                            crumb_runtime[_tp_arg.name]["owned"] = False
+                        for _tp_ctx in scope_drop_stack:
+                            _tp_ctx.get("body_decl_names", set()).discard(_tp_arg.name)
+                            _tp_ctx["extra_ir_owned"] = [
+                                (_ir_nm, _ir_ty, _ir_src)
+                                for _ir_nm, _ir_ty, _ir_src
+                                in _tp_ctx.get("extra_ir_owned", [])
+                                if _tp_sym is None or _ir_src != _tp_sym[1]
+                            ]
             return tmp2
     if isinstance(expr, FieldAccess):
         if isinstance(expr.base, Var) and expr.base.name in enum_variant_map:
@@ -4387,6 +4509,21 @@ def infer_type(expr: Expr) -> str:
                 getattr(expr, "col", None),
                 "Await supports only direct Call(...) expressions in type checking",
             )
+    if isinstance(expr, TakeExpr):
+        _take_res = symbol_table.lookup(expr.varname)
+        if _take_res is None:
+            bhumi_report_error(
+                getattr(expr, "lineno", None),
+                getattr(expr, "col", None),
+                f"take: undefined variable '{expr.varname}'",
+            )
+        _take_llvm, _ = _take_res
+        for _high, _low in type_map.items():
+            if _low == _take_llvm:
+                return _high
+        if _take_llvm.startswith("%struct.") and _take_llvm.endswith("*"):
+            return _take_llvm[len("%struct."):-1] + "*"
+        return _take_llvm
     if isinstance(expr, Var):
         result = symbol_table.lookup(expr.name)
         if result is None:
@@ -4961,8 +5098,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             crumb_runtime[stmt.name]["owned"] = True
                         if _src_vn in crumb_runtime:
                             crumb_runtime[_src_vn]["owned"] = False
-                        # Fix: null out source slot to break the alias so a
-                        # future stray free of the source cannot double-free.
                         _src_res = symbol_table.lookup(_src_vn)
                         if _src_res is not None:
                             _src_llvm_vd, _src_ir_vd = _src_res
@@ -4983,6 +5118,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         owned_vars.add(stmt.name)
                         if stmt.name in crumb_runtime:
                             crumb_runtime[stmt.name]["owned"] = True
+                elif isinstance(stmt.expr, TakeExpr):
+                    owned_vars.add(stmt.name)
+                    if stmt.name in crumb_runtime:
+                        crumb_runtime[stmt.name]["owned"] = True
                 return
             if src_llvm.endswith("*") and not llvm_ty.endswith("*"):
                 bhumi_report_error(
@@ -5011,6 +5150,10 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     owned_vars.add(stmt.name)
                     if stmt.name in crumb_runtime:
                         crumb_runtime[stmt.name]["owned"] = True
+            elif isinstance(stmt.expr, TakeExpr):
+                owned_vars.add(stmt.name)
+                if stmt.name in crumb_runtime:
+                    crumb_runtime[stmt.name]["owned"] = True
         return
     elif isinstance(stmt, Assign):
         if isinstance(stmt.name, UnaryDeref):
@@ -5182,11 +5325,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     isinstance(stmt.expr, Call)
                     and (_stmt_expr_ty == "string" or _stmt_expr_ty.endswith("*"))
                 )
-                # A string literal is a read-only static pointer — not heap.
-                # If the variable currently owns a heap string we must free it
-                # BEFORE storing the literal, otherwise the heap string leaks and
-                # the variable is later (incorrectly) freed as if it still points
-                # to heap memory, causing a free-of-static-literal crash.
                 or (isinstance(stmt.expr, StrLit) and llvm_ty == "i8*")
             )
             _rhs_takes_lhs = False
@@ -5204,6 +5342,8 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             if isinstance(_ta, Var) and _ta.name == vn:
                                 _rhs_takes_lhs = True
                                 break
+            if isinstance(stmt.expr, TakeExpr) and stmt.expr.varname == vn:
+                _rhs_takes_lhs = True
             if (
                 cr is None
                 and vn in owned_vars
@@ -5255,11 +5395,6 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         crumb_runtime[vn]["owned"] = True
                     if _src_vn2 in crumb_runtime:
                         crumb_runtime[_src_vn2]["owned"] = False
-                    # Fix: null out the source slot in IR to sever the alias.
-                    # After ownership transfer, both slots hold the same raw
-                    # pointer.  Any future stray free of the source would be a
-                    # double-free; writing null here makes bhumi_safe_c_free
-                    # skip it safely.
                     _src_res2 = symbol_table.lookup(_src_vn2)
                     if _src_res2 is not None:
                         _src_llvm2, _src_ir2 = _src_res2
@@ -5272,14 +5407,13 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             f"  store {_src_llvm2} null, {_src_llvm2}* {_src_addr2}"
                         )
             elif isinstance(stmt.expr, StrLit) and llvm_ty == "i8*":
-                # The variable now holds a GEP into read-only .rodata — not a
-                # heap allocation.  The _reassign_allocs_new path above already
-                # freed any heap string that was previously owned by this var.
-                # Explicitly drop ownership so _emit_scope_drops never tries to
-                # call bhumi_safe_c_free on a static literal pointer.
                 owned_vars.discard(vn)
                 if vn in crumb_runtime:
                     crumb_runtime[vn]["owned"] = False
+            elif isinstance(stmt.expr, TakeExpr):
+                owned_vars.add(vn)
+                if vn in crumb_runtime:
+                    crumb_runtime[vn]["owned"] = True
     elif isinstance(stmt, ContinueStmt):
         if not loop_stack:
             bhumi_report_error(None, None, "`continue` used outside of a loop")
@@ -5649,6 +5783,32 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             _ctx["extra_ir_owned"] = [(_ir_nm, _ir_ty, _ir_src)
                 for _ir_nm, _ir_ty, _ir_src in _eirowned
                 if _ir_nm != llvm_name
+            ]
+    elif isinstance(stmt, TakeStmt):
+        _tk_sym = symbol_table.lookup(stmt.varname)
+        if _tk_sym is None:
+            bhumi_report_error(
+                getattr(stmt, "lineno", None),
+                getattr(stmt, "col", None),
+                f"take: undefined variable '{stmt.varname}'",
+            )
+        _tk_llvm, _tk_ir = _tk_sym
+        _tk_addr = f"@{_tk_ir}" if _tk_ir.startswith("@") else f"%{_tk_ir}_addr"
+        out.append(f"  store {_tk_llvm} {zero_const_for_llvm(_tk_llvm)}, {_tk_llvm}* {_tk_addr}")
+        _tk_bep = binding_enum_payload.get(_tk_ir)
+        if _tk_bep is not None:
+            _, _, _, _tk_bep_pty, _tk_bep_slot = _tk_bep
+            out.append(f"  store {_tk_bep_pty} null, {_tk_bep_pty}* {_tk_bep_slot}")
+        if stmt.varname in crumb_runtime:
+            crumb_runtime[stmt.varname]["owned"] = False
+        owned_vars.discard(stmt.varname)
+        for _ctx in scope_drop_stack:
+            _ctx.get("body_decl_names", set()).discard(stmt.varname)
+            _eiro = _ctx.get("extra_ir_owned", [])
+            _ctx["extra_ir_owned"] = [
+                (_ir_nm, _ir_ty, _ir_src)
+                for _ir_nm, _ir_ty, _ir_src in _eiro
+                if _ir_src != _tk_ir
             ]
     elif isinstance(stmt, Match):
         raw_ty = infer_type(stmt.expr)
@@ -6388,6 +6548,11 @@ def annotate_types(prog: Program) -> None:
                     _ann_expr(inner)
                     return _cache(expr, base_fn.ret_type)
             return None
+        if isinstance(expr, TakeExpr):
+            t = ann_env.lookup(expr.varname)
+            if t is None:
+                return None
+            return _cache(expr, t)
         if isinstance(expr, FieldAccess):
             base_t = _ann_expr(expr.base)
             if base_t is None:
@@ -7989,6 +8154,23 @@ def check_types(prog: Program):
                     f"Cannot dereference non-pointer type '{ptr_t}'",
                 )
             return ptr_t[:-1]
+        if isinstance(expr, TakeExpr):
+            typ = env.lookup(expr.varname)
+            if not typ:
+                bhumi_report_error(
+                    getattr(expr, "lineno", None),
+                    getattr(expr, "col", None),
+                    f"take: use of undeclared variable '{expr.varname}'",
+                )
+            if typ == "undefined":
+                bhumi_report_error(
+                    getattr(expr, "lineno", None),
+                    getattr(expr, "col", None),
+                    f"take: variable '{expr.varname}' has already been moved or freed",
+                )
+            env.declare(expr.varname, "undefined")
+            _inc_read(expr.varname, node_desc=f"TakeExpr@{getattr(expr, 'lineno', '?')}")
+            return typ
         if isinstance(expr, Var):
             typ = env.lookup(expr.name)
             if not typ:
@@ -8855,6 +9037,8 @@ def check_types(prog: Program):
                         _is_nown_init = True
                 elif isinstance(stmt.expr, Var) and stmt.expr.name in nown_vars:
                     _is_nown_init = True
+                elif isinstance(stmt.expr, TakeExpr) and stmt.expr.varname in nown_vars:
+                    _is_nown_init = True
                 if _is_nown_init:
                     nown_vars.add(stmt.name)
             if stmt.expr:
@@ -9087,7 +9271,6 @@ def check_types(prog: Program):
             else:
                 expr_type = check_expr(stmt.expr, expected=var_type)
             _simple_rhs = isinstance(stmt.expr, (IntLit, BoolLit, CharLit, Var, Call))
-
             if _simple_rhs and expr_type.startswith("int") and var_type.startswith("float"):
                 stmt.expr = Cast(var_type, stmt.expr)
                 expr_type = var_type
@@ -9139,6 +9322,8 @@ def check_types(prog: Program):
                         nown_vars.add(stmt.name)
                 elif isinstance(stmt.expr, Var) and stmt.expr.name in nown_vars:
                     nown_vars.add(stmt.name)
+                elif isinstance(stmt.expr, TakeExpr) and stmt.expr.varname in nown_vars:
+                    nown_vars.add(stmt.name)
             if isinstance(stmt.expr, Var) and var_type.endswith("*"):
                 src_name = stmt.expr.name
                 if src_name != stmt.name:
@@ -9176,6 +9361,22 @@ def check_types(prog: Program):
                     getattr(stmt, "col", None),
                     f"'forget({stmt.varname})' is not allowed: \n'{stmt.varname}' does not trace back to a 'nown' (non owning) function.\n"
                     f"Only values returned by 'nown' functions may be manually released with forget() or free().",
+                )
+            env.declare(stmt.varname, "undefined")
+            return
+        if isinstance(stmt, TakeStmt):
+            _tk_typ = env.lookup(stmt.varname)
+            if _tk_typ is None:
+                bhumi_report_error(
+                    getattr(stmt, "lineno", None),
+                    getattr(stmt, "col", None),
+                    f"take: undeclared variable '{stmt.varname}'",
+                )
+            if _tk_typ == "undefined":
+                bhumi_report_error(
+                    getattr(stmt, "lineno", None),
+                    getattr(stmt, "col", None),
+                    f"take: variable '{stmt.varname}' has already been moved or freed",
                 )
             env.declare(stmt.varname, "undefined")
             return
