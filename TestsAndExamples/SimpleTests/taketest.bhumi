@@ -1,0 +1,4 @@
+fn main() <int> {
+    string t = "hello";
+    string y = take t;
+}
