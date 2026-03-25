@@ -85,6 +85,25 @@ def _llvm_to_lang_impl(llvm_t: str) -> str:
             return base[len("%enum.") :] + "*"
         return "void*"
     return llvm_t
+def _llvm_escape_utf8_c_string(s: str) -> tuple[str, int]:
+    b = s.encode("utf-8")
+    esc_parts = []
+    for byte in b:
+        if byte == 10:
+            esc_parts.append(r"\0A")
+        elif byte == 13:
+            esc_parts.append(r"\0D")
+        elif byte == 9:
+            esc_parts.append(r"\09")
+        elif byte == 92:
+            esc_parts.append(r"\\")
+        elif byte == 34:
+            esc_parts.append(r"\22")
+        elif 32 <= byte <= 126:
+            esc_parts.append(chr(byte))
+        else:
+            esc_parts.append(f"\\{byte:02X}")
+    return "".join(esc_parts), len(b) + 1
 TYPE_TOKENS = {
     "IDENT",   "INT",    "INT8",   "INT16",  "INT32",  "INT64",
     "FLOAT",   "FLOAT32",
@@ -3288,25 +3307,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
     if isinstance(expr, StrLit):
         tmp = new_tmp()
         label = f"@.str{len(string_constants)}"
-        raw = expr.value
-        esc = ""
-        for ch in raw:
-            code = ord(ch)
-            if ch == "\n":
-                esc += r"\0A"
-            elif ch == "\r":
-                esc += r"\0D"
-            elif ch == "\t":
-                esc += r"\09"
-            elif ch == "\\":
-                esc += r"\\"
-            elif ch == '"':
-                esc += r"\22"
-            elif 32 <= code <= 126:
-                esc += ch
-            else:
-                esc += f"\\{code:02X}"
-        byte_len = len(raw.encode("utf-8")) + 1
+        esc, byte_len = _llvm_escape_utf8_c_string(expr.value)
         string_constants.append(
             f'{label} = private unnamed_addr constant [{byte_len} x i8] c"{esc}\\00"'
         )
@@ -3602,6 +3603,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 ):
                     continue
                 _spill_llvm_ty = llvm_ty_of(_spill_ty)
+                if _spill_llvm_ty.startswith("%struct.") and not _spill_llvm_ty.endswith("*"):
+                    continue
                 _spill_id = new_tmp()[1:]
                 _spill_name = f"__ar_anon_{_spill_id}"
                 _entry_alloca_buf.append(
@@ -6483,7 +6486,7 @@ def annotate_types(prog: Program) -> None:
                                 if v == ret_llvm:
                                     return _cache(expr, k)
                             if ret_llvm.startswith("%struct."):
-                                return _cache(expr, ret_llvm[8:] + "*")
+                                return _cache(expr, ret_llvm[8:])
                             if ret_llvm.startswith("%enum."):
                                 return _cache(expr, ret_llvm[6:].rstrip("*") + "*")
                     except Exception:
@@ -6495,7 +6498,7 @@ def annotate_types(prog: Program) -> None:
                     if v == ret_llvm:
                         return _cache(expr, k)
                 if ret_llvm.startswith("%struct."):
-                    return _cache(expr, ret_llvm[8:] + "*")
+                    return _cache(expr, ret_llvm[8:])
                 if ret_llvm.startswith("%enum."):
                     return _cache(expr, ret_llvm[6:].rstrip("*") + "*")
                 return _cache(expr, ret_llvm)
@@ -7610,19 +7613,7 @@ entry:
             initializer = str(ord(g.expr.value))
         elif isinstance(g.expr, StrLit):
             label = f"@.str{len(string_constants)}"
-            esc = ""
-            for ch in g.expr.value:
-                if ch == "\n":
-                    esc += r"\0A"
-                elif ch == "\t":
-                    esc += r"\09"
-                elif ch == "\\":
-                    esc += r"\\"
-                elif ch == '"':
-                    esc += r"\""
-                else:
-                    esc += ch
-            length = len(g.expr.value) + 1
+            esc, length = _llvm_escape_utf8_c_string(g.expr.value)
             string_constants.append(
                 f'{label} = private unnamed_addr constant [{length} x i8] c"{esc}\\00"'
             )
@@ -8536,7 +8527,7 @@ def check_types(prog: Program):
                     if _ft_ret == "void":
                         return "void"
                     if _ft_ret.startswith("%struct."):
-                        return _ft_ret[8:] + "*"
+                        return _ft_ret[8:]
                     return _ft_ret
                 bhumi_report_error(
                     getattr(expr, "lineno", None),
@@ -9050,13 +9041,15 @@ def check_types(prog: Program):
                 )
             else:
                 expr_type = check_expr(stmt.expr, expected=var_type)
-            if expr_type.startswith("int") and var_type.startswith("float"):
+            _simple_rhs = isinstance(stmt.expr, (IntLit, BoolLit, CharLit, Var, Call))
+
+            if _simple_rhs and expr_type.startswith("int") and var_type.startswith("float"):
                 stmt.expr = Cast(var_type, stmt.expr)
                 expr_type = var_type
-            elif expr_type == "float" and var_type == "float32":
+            elif _simple_rhs and expr_type == "float" and var_type == "float32":
                 stmt.expr = Cast("float32", stmt.expr)
                 expr_type = "float32"
-            elif expr_type == "float32" and var_type == "float":
+            elif _simple_rhs and expr_type == "float32" and var_type == "float":
                 stmt.expr = Cast("float", stmt.expr)
                 expr_type = "float"
             if expr_type != var_type:
