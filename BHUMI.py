@@ -4961,6 +4961,20 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                             crumb_runtime[stmt.name]["owned"] = True
                         if _src_vn in crumb_runtime:
                             crumb_runtime[_src_vn]["owned"] = False
+                        # Fix: null out source slot to break the alias so a
+                        # future stray free of the source cannot double-free.
+                        _src_res = symbol_table.lookup(_src_vn)
+                        if _src_res is not None:
+                            _src_llvm_vd, _src_ir_vd = _src_res
+                            _src_addr_vd = (
+                                _src_ir_vd
+                                if _src_ir_vd.startswith("@")
+                                else f"%{_src_ir_vd}_addr"
+                            )
+                            out.append(
+                                f"  store {_src_llvm_vd} null,"
+                                f" {_src_llvm_vd}* {_src_addr_vd}"
+                            )
                 elif isinstance(stmt.expr, BinOp):
                     _binop_ty = infer_type(stmt.expr)
                     if _binop_ty == "string" or (
@@ -5168,6 +5182,12 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     isinstance(stmt.expr, Call)
                     and (_stmt_expr_ty == "string" or _stmt_expr_ty.endswith("*"))
                 )
+                # A string literal is a read-only static pointer — not heap.
+                # If the variable currently owns a heap string we must free it
+                # BEFORE storing the literal, otherwise the heap string leaks and
+                # the variable is later (incorrectly) freed as if it still points
+                # to heap memory, causing a free-of-static-literal crash.
+                or (isinstance(stmt.expr, StrLit) and llvm_ty == "i8*")
             )
             _rhs_takes_lhs = False
             if isinstance(stmt.expr, Call):
@@ -5235,6 +5255,31 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         crumb_runtime[vn]["owned"] = True
                     if _src_vn2 in crumb_runtime:
                         crumb_runtime[_src_vn2]["owned"] = False
+                    # Fix: null out the source slot in IR to sever the alias.
+                    # After ownership transfer, both slots hold the same raw
+                    # pointer.  Any future stray free of the source would be a
+                    # double-free; writing null here makes bhumi_safe_c_free
+                    # skip it safely.
+                    _src_res2 = symbol_table.lookup(_src_vn2)
+                    if _src_res2 is not None:
+                        _src_llvm2, _src_ir2 = _src_res2
+                        _src_addr2 = (
+                            _src_ir2
+                            if _src_ir2.startswith("@")
+                            else f"%{_src_ir2}_addr"
+                        )
+                        out.append(
+                            f"  store {_src_llvm2} null, {_src_llvm2}* {_src_addr2}"
+                        )
+            elif isinstance(stmt.expr, StrLit) and llvm_ty == "i8*":
+                # The variable now holds a GEP into read-only .rodata — not a
+                # heap allocation.  The _reassign_allocs_new path above already
+                # freed any heap string that was previously owned by this var.
+                # Explicitly drop ownership so _emit_scope_drops never tries to
+                # call bhumi_safe_c_free on a static literal pointer.
+                owned_vars.discard(vn)
+                if vn in crumb_runtime:
+                    crumb_runtime[vn]["owned"] = False
     elif isinstance(stmt, ContinueStmt):
         if not loop_stack:
             bhumi_report_error(None, None, "`continue` used outside of a loop")
