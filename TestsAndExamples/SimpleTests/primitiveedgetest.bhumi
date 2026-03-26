@@ -1,0 +1,37 @@
+import C_std;
+
+fn main() <void> {
+    string s = sb_finish("test");
+    string d = "test";
+    string b = d + "tesa";
+    await discord_send("test");
+
+    string de = de + "ext";
+    bool f = !!!!f;
+}
+
+extern async fn discord_send(string msg) <int32> !_init=discord_send_begin !_resume=discord_send_poll;
+
+/*
+C side:
+
+typedef struct async_discord_send {
+    int32_t state;
+    int32_t ret;
+    char *msg;
+} async_discord_send;
+
+async_discord_send* discord_send_begin(char *msg) {
+    async_discord_send *sm = (async_discord_send*)malloc(sizeof(async_discord_send));
+    sm->state = 0;
+    sm->ret = 0;
+    sm->msg = msg;
+    return sm;
+}
+
+int discord_send_poll(async_discord_send *sm) {
+    printf("[shim] discord_send: %s\n", sm->msg ? sm->msg : "(null)");
+    sm->ret = 123;
+    return 1;
+}
+*/
