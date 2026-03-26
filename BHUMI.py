@@ -77,6 +77,11 @@ def _llvm_to_lang_impl(llvm_t: str) -> str:
         return "float"
     if llvm_t == "float":
         return "float32"
+    _fixed_arr_llvm_m = re.fullmatch(r"\[(\d+) x (.+)]\*", llvm_t)
+    if _fixed_arr_llvm_m:
+        count_l, elem_llvm = _fixed_arr_llvm_m.group(1), _fixed_arr_llvm_m.group(2)
+        elem_lang = llvm_to_lang(elem_llvm)
+        return f"{elem_lang}[{count_l}]"
     if llvm_t.endswith("*"):
         base = llvm_t.rstrip("*")
         if base.startswith("%struct."):
@@ -167,7 +172,7 @@ class ScopedTable:
         self.scopes.append({})
     def pop(self):
         self.scopes.pop()
-    def declare(self, name: str, *value):
+    def declare(self, name: str, *value: object) -> None:
         self.scopes[-1][name] = value[0] if len(value) == 1 else value
     def lookup(self, name: str):
         for scope in reversed(self.scopes):
@@ -179,16 +184,18 @@ class ScopedTable:
     def clear(self):
         self.scopes = [{}]
 class SymbolTable(ScopedTable):
-    def declare(self, name: str, llvm_type: str, ir_name: str):
-        self.scopes[-1][name] = (llvm_type, ir_name)
+    def declare(self, name: str, *value: object) -> None:
+        assert len(value) == 2
+        self.scopes[-1][name] = (value[0], value[1])
     def lookup(self, name: str) -> Optional[Tuple[str, str]]:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
         return None
 class TypeEnv(ScopedTable):
-    def declare(self, name: str, typ: str):
-        self.scopes[-1][name] = typ
+    def declare(self, name: str, *value: object) -> None:
+        assert len(value) == 1
+        self.scopes[-1][name] = value[0]
     def lookup(self, name: str) -> Optional[str]:
         for scope in reversed(self.scopes):
             if name in scope:
@@ -668,7 +675,7 @@ def _struct_c_abi_int(struct_name: str) -> Optional[str]:
             return None
         try:
             total_bits += int(fllvm[1:])
-        except Exception:
+        except ValueError:
             return None
     return {8: "i8", 16: "i16", 32: "i32", 64: "i64"}.get(total_bits)
 def emit_cast_value(
@@ -684,7 +691,7 @@ def emit_cast_value(
             if line.startswith(f"{val} ="):
                 parts = line.split()
                 if "to" in parts:
-                    actual = parts[parts.index("to") + 1].rstrip(",")
+                    _ = parts[parts.index("to") + 1].rstrip(",")
                 else:
                     actual = parts[3].rstrip(",")
                     if actual == dst_llvm:
@@ -713,16 +720,16 @@ def emit_cast_value(
                     break
                 try:
                     fb = int(fllvm[1:])
-                except Exception:
+                except ValueError:
                     supported = False
                     break
                 field_infos.append((idx, fllvm, fb))
                 total_bits += fb
             try:
                 dst_bits = int(dst_llvm[1:])
-            except Exception:
+            except ValueError:
                 dst_bits = 0
-            if supported and 0 < total_bits <= dst_bits and total_bits <= 64 and dst_bits <= 64:
+            if supported and 0 < total_bits <= dst_bits <= 64 and total_bits <= 64:
                 accum = None
                 shift_acc = 0
                 for (idx, fllvm, fb) in field_infos:
@@ -1070,7 +1077,6 @@ def lex(source: str) -> List[Token]:
             tokens.append(Token(SINGLE_CHARS[c], c, line, col))
             i += 1
             col += 1
-            matched = True
             continue
         bhumi_report_error(line, col, f"Unrecognized character '{c}'")
     tokens.append(Token("EOF", "", line, col))
@@ -1320,6 +1326,7 @@ class Parser:
         self.declared_vars: Dict[str, VarDecl] = {}
         self.tokens = tokens
         self.pos = 0
+        self.program: Optional["Program"] = None
     def peek(self) -> Token:
         return self.tokens[self.pos]
     def bump(self) -> Token:
@@ -2036,10 +2043,10 @@ class Parser:
         if self.peek().kind == "NOMD":
             self.bump()
             nomd = True
-        prefix_amp = False
+        _prefix_amp = False
         if self.peek().kind == "AMP":
             self.bump()
-            prefix_amp = True
+            _prefix_amp = True
         if self.peek().kind in TYPE_TOKENS or self.peek().kind == "IDENT" or self.peek().kind == "AMP":
             typ = self.parse_type()
         else:
@@ -2161,7 +2168,8 @@ class Parser:
                 continue
             break
         return left
-    def get_precedence(self, op: str) -> int:
+    @staticmethod
+    def get_precedence(op: str) -> int:
         return {
             "STAR": 9, "SLASH": 9, "PERCENT": 9, "PLUS": 8,
             "MINUS": 8, "LSHIFT": 7, "RSHIFT": 7, "LT": 6,
@@ -2242,7 +2250,7 @@ class Parser:
             if t.kind == "INT" and re.match(r"^[0-9]", t.value):
                 try:
                     return IntLit(int(t.value, 0))
-                except Exception:
+                except ValueError:
                     bhumi_report_error(
                         t.line, t.col, f"Invalid integer literal: {t.value}"
                     )
@@ -2367,7 +2375,7 @@ def unify_int_types(t1: Optional[str], t2: Optional[str]) -> Optional[str]:
     try:
         b1, u1 = int_type_info(t1)
         b2, u2 = int_type_info(t2)
-    except Exception:
+    except (ValueError, TypeError):
         return None
     if b1 == b2 and bool(u1) == bool(u2):
         if b1 == 64:
@@ -2407,7 +2415,7 @@ def _c_promote_types(t1: str, t2: str) -> str:
         if bits == 64:
             return "uint" if unsigned else "int"
         return f"uint{bits}" if unsigned else f"int{bits}"
-    except Exception:
+    except (ValueError, TypeError):
         pass
     return t1
 type_map = {
@@ -2654,7 +2662,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     dst_llvm = llvm_ty_of(dst_t)
                     out.append(f"  {tmp} = add {dst_llvm} 0, {ival}")
                     return tmp
-                except Exception:
+                except ValueError:
                     bhumi_report_error(
                         None, None, f"Cannot convert string '{inner.value}' to integer"
                     )
@@ -2665,7 +2673,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     fstr = f"{fval:.8e}"
                     out.append(f"  {tmp} = fadd {dst_llvm} 0.0, {fstr}")
                     return tmp
-                except Exception:
+                except ValueError:
                     bhumi_report_error(
                         None, None, f"Cannot convert string '{inner.value}' to float"
                     )
@@ -3601,7 +3609,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         variant_name = expr.name
         if "->" in expr.name:
             qualified_enum, variant_name = expr.name.split("->", 1)
-        args_ir: List[str] = []
+        _args_ir: List[str] = []
         arg_types: List[str] = []
         arg_vals: List[str] = []
         _variant_arg_expected: List[Optional[str]] = [None] * len(expr.args)
@@ -3704,16 +3712,15 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             else:
                 use_site_line = getattr(expr, "lineno", None)
                 use_site_col = getattr(expr, "col", None)
-                msg_lines = []
-                msg_lines.append(f"ambiguous enum variant '{variant_name}'")
-                msg_lines.append("")
-                msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
+                msg_lines = [
+                    f"ambiguous enum variant '{variant_name}'",
+                    "",
+                    f"The name `{variant_name}` matches multiple enum variants in scope:",
+                ]
                 for ename, idx, payload in candidates:
                     payload_desc = "no payload" if payload is None else f"payload={payload}"
                     msg_lines.append(f"  - {ename}->{variant_name}  ({payload_desc})")
-                msg_lines.append("")
-                msg_lines.append("To fix, qualify the variant with its enum name:")
-                msg_lines.append(f"  - To choose a variant:  {candidates[0][0]}->{variant_name}(...)")
+                msg_lines += ["", "To fix, qualify the variant with its enum name:", f"  - To choose a variant:  {candidates[0][0]}->{variant_name}(...)"]
                 bhumi_report_error(use_site_line, use_site_col, "\n".join(msg_lines))
         if found_enum is not None:
             template = original_enum_defs.get(found_enum)
@@ -4117,7 +4124,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         cast_tmp = new_tmp()
                         out.append(f"  {cast_tmp} = bitcast i8* {arg_val} to i8*")
                         out.append(f"  call void @free(i8* {cast_tmp})")
-                except Exception:
+                except (AttributeError, TypeError):
                     pass
             _tp_fn_void = _func_name_map.get(call_target)
             if _tp_fn_void is None and "__mono__" in call_target:
@@ -4676,7 +4683,7 @@ def infer_type(expr: Expr) -> str:
             return ename + "*"
         for fn in all_funcs:
             if fn.name == expr.name and fn.ret_type == "#":
-                arg_types_for_mono = [infer_type(a) for a in (expr.args or [])]
+                _arg_types_for_mono = [infer_type(a) for a in (expr.args or [])]
                 for ft_name, ft_ret in func_table.items():
                     if not ft_name.startswith(expr.name + "__mono__"):
                         continue
@@ -4696,6 +4703,11 @@ def infer_type(expr: Expr) -> str:
                     return k
             if ret_llvm_ty.startswith("%struct."):
                 return ret_llvm_ty[8:]
+            _arr_ret_m = re.fullmatch(r"\[(\d+) x (.+)]\*", ret_llvm_ty)
+            if _arr_ret_m:
+                _arr_count, _arr_elem_llvm = _arr_ret_m.group(1), _arr_ret_m.group(2)
+                _arr_elem_lang = llvm_to_lang(_arr_elem_llvm)
+                return f"{_arr_elem_lang}[{_arr_count}]"
             return ret_llvm_ty
         for fn in all_funcs:
             if fn.name == expr.name and fn.type_params:
@@ -4724,7 +4736,7 @@ def infer_type(expr: Expr) -> str:
                             f"Cannot infer type parameter '{tp}' for generic function '{expr.name}'",
                         )
                     actuals.append(found)
-                mononame = ensure_monomorph_for_call(expr.name, actuals)
+                _mononame = ensure_monomorph_for_call(expr.name, actuals)
                 new_ret = fn.ret_type
                 if new_ret in fn.type_params:
                     idx = fn.type_params.index(new_ret)
@@ -4771,7 +4783,7 @@ def infer_type(expr: Expr) -> str:
         getattr(expr, "col", None),
         f"Cannot infer type for expression: {expr}",
     )
-def emit_deep_free(llvm_ty: str, ptr_tmp: str, out: List[str], safe_envelope: bool = False) -> None:
+def emit_deep_free(llvm_ty: str, ptr_tmp: str, out: List[str], _safe_envelope: bool = False) -> None:
     enum_name = None
     if llvm_ty.startswith("%enum.") and llvm_ty.endswith("*"):
         enum_name = llvm_ty[len("%enum."):-1]
@@ -4929,7 +4941,7 @@ def _emit_scope_drops(ctx: dict, out: List[str], force: bool = False) -> None:
         out.append(f"  {drop_null_tmp} = icmp eq i8* {cast_tmp}, null")
         out.append(f"  br i1 {drop_null_tmp}, label %{drop_skip_lbl}, label %{drop_free_lbl}")
         out.append(f"{drop_free_lbl}:")
-        emit_deep_free(llvm_ty, ptr_tmp, out, safe_envelope=(nm in _extern_spill_names))
+        emit_deep_free(llvm_ty, ptr_tmp, out, _safe_envelope=(nm in _extern_spill_names))
         out.append(f"  store {llvm_ty} null, {llvm_ty}* {addr_token}")
         out.append(f"  br label %{drop_skip_lbl}")
         out.append(f"{drop_skip_lbl}:")
@@ -4998,17 +5010,17 @@ def _name_used_in_stmts(name: str, stmts) -> bool:
 def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
     if isinstance(stmt, VarDecl):
         def _pick_ir_name(name):
-            existing = None
+            existing: Optional[Tuple[str, str]]
             try:
                 existing = symbol_table.lookup(name)
-            except Exception:
+            except (AttributeError, KeyError):
                 existing = None
             if existing is not None and name not in symbol_table.scopes[-1]:
                 suf = new_tmp()[1:]
                 return f"{name}_{suf}"
             return name
         ir_name = _pick_ir_name(stmt.name)
-        llvm_ty = None
+        llvm_ty: str
         if "[" in stmt.typ:
             base, rest = stmt.typ.split("[", 1)
             count = rest[:-1]
@@ -5368,6 +5380,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 out.append(f"{_drop_old_skip}:")
             _expr_llvm_ty = llvm_ty_of(infer_type(stmt.expr))
             if _expr_llvm_ty != llvm_ty and val is not None:
+                assert llvm_ty is not None
                 _coerced = emit_cast_value(val, infer_type(stmt.expr), llvm_to_lang(llvm_ty), out)
                 if _coerced is not None:
                     val = _coerced
@@ -5764,7 +5777,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         out.append(f"  {null_tmp} = icmp eq i8* {cast_tmp}, null")
         out.append(f"  br i1 {null_tmp}, label %{skip_lbl}, label %{try_free_lbl}")
         out.append(f"{try_free_lbl}:")
-        emit_deep_free(llvm_ty, ptr_tmp, out, safe_envelope=True)
+        emit_deep_free(llvm_ty, ptr_tmp, out, _safe_envelope=True)
         null_store_lbl = new_label("forget_null_store")
         out.append(f"  br label %{null_store_lbl}")
         out.append(f"{null_store_lbl}:")
@@ -5936,7 +5949,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         for idx, (vname, _) in enumerate(enum_variant_map[enum_name]):
             out.append(f"	i32 {idx}, label %{variant_labels[vname]}")
         out.append("  ]")
-        def gen_nested_match_case(case, outer_enum_name, outer_enum_ptr, outer_payload_val, outer_payload_type, arm_end_lbl, out, ret_ty, outer_enum_ptr_owned=False):
+        def gen_nested_match_case(case, _outer_enum_name, _outer_enum_ptr, outer_payload_val, outer_payload_type, arm_end_lbl, out, ret_ty, outer_enum_ptr_owned=False):
             if case.nested_pattern is None:
                 if outer_payload_val is not None and case.binding is not None:
                     llvm_payload_ty = llvm_ty_of(outer_payload_type)
@@ -6289,6 +6302,8 @@ def gen_func(fn: Func) -> List[str]:
                     return abi_int
             return lt
         param_sig = ", ".join(f"{_extern_param_llvm(t)} %{n}" for t, n in fn.params)
+        if fn.is_variadic:
+            param_sig = (param_sig + ", ..." if param_sig else "...")
         ret_ty = llvm_ty_of(fn.ret_type)
         generated_mono[fn.name] = True
         _restore_outer()
@@ -6321,8 +6336,7 @@ def gen_func(fn: Func) -> List[str]:
     __bhumi_current_codegen_fn = fn
     if fn.name == "main":
         ret_ty = "i32"
-        out = [f"define i32 @main(i32 %argc, i8** %argv) {{", "entry:"]
-        out.append("  store i8** %argv, i8*** @__argv_ptr")
+        out = [f"define i32 @main(i32 %argc, i8** %argv) {{", "entry:", "  store i8** %argv, i8*** @__argv_ptr"]
     else:
         _check_no_bare_generic(
             fn.ret_type,
@@ -6648,7 +6662,7 @@ def annotate_types(prog: Program) -> None:
                             try:
                                 mono = ensure_monomorph_for_enum(chosen_enum, [actual_payload])
                                 return _cache(expr, mono + "*")
-                            except Exception:
+                            except (KeyError, TypeError):
                                 pass
                         else:
                             if expected is not None:
@@ -6660,7 +6674,7 @@ def annotate_types(prog: Program) -> None:
                                         try:
                                             mono = ensure_monomorph_for_enum(chosen_enum, parts)
                                             return _cache(expr, mono + "*")
-                                        except Exception:
+                                        except (KeyError, TypeError):
                                             pass
                     return _cache(expr, chosen_enum + "*")
                 if type_map.get(chosen_enum, "").startswith("i") and chosen_payload is None:
@@ -6699,7 +6713,7 @@ def annotate_types(prog: Program) -> None:
                                 return _cache(expr, ret_llvm[8:])
                             if ret_llvm.startswith("%enum."):
                                 return _cache(expr, ret_llvm[6:].rstrip("*") + "*")
-                    except Exception:
+                    except (KeyError, TypeError):
                         pass
                 return None
             if expr.name in func_table:
@@ -7970,13 +7984,15 @@ def check_types(prog: Program):
     nown_vars: set = set()
     crumb_order: Dict[str, int] = {}
     write_revoked: set = set()
-    def _inc_read(name: str, node_desc: Optional[str] = None):
+    def _inc_read(name: str, node_desc: Optional[str] = None) -> None:
+        _ = node_desc
         if name not in crumb_map:
             return
         rmax, wmax, rc, wc = crumb_map[name]
         rc += 1
         crumb_map[name] = (rmax, wmax, rc, wc)
-    def _inc_write(name: str, node_desc: Optional[str] = None):
+    def _inc_write(name: str, node_desc: Optional[str] = None) -> None:
+        _ = node_desc
         if name not in crumb_map:
             return
         rmax, wmax, rc, wc = crumb_map[name]
@@ -8044,7 +8060,7 @@ def check_types(prog: Program):
         if isinstance(e, IntLit):
             try:
                 return int(e.value)
-            except Exception:
+            except (ValueError, AttributeError):
                 return None
         if isinstance(e, UnaryOp):
             if e.op in ("-", "+"):
@@ -8077,7 +8093,7 @@ def check_types(prog: Program):
                     return left << right
                 if e.op == ">>":
                     return left >> right
-            except Exception:
+            except (TypeError, ValueError, ZeroDivisionError):
                 return None
         return None
     def check_expr(expr: Expr, expected: Optional[str] = None) -> str:
@@ -8525,7 +8541,6 @@ def check_types(prog: Program):
             gm = variant_map_global
             candidates.extend(gm.get(variant_name, []))
             if candidates:
-                chosen = None
                 if qualified_enum is not None:
                     candidates = [
                         (ename, payload)
@@ -8610,11 +8625,12 @@ def check_types(prog: Program):
                             return base
                         type_params = getattr(orig, "type_params", [])
                         return base + "<" + ", ".join(type_params) + ">" if type_params else base
-                    msg_lines = []
-                    msg_lines.append(f"ambiguous enum variant '{variant_name}'")
-                    msg_lines.append("")
-                    msg_lines.append(f"The name `{variant_name}` matches multiple enum variants in scope:")
                     seen_bases: set = set()
+                    msg_lines = [
+                        f"ambiguous enum variant '{variant_name}'",
+                        "",
+                        f"The name `{variant_name}` matches multiple enum variants in scope:",
+                    ]
                     for ename, payload in candidates:
                         pretty = _pretty_enum_name(ename)
                         base_key = ename.partition("__mono__")[0] if "__mono__" in ename else ename
@@ -8623,10 +8639,8 @@ def check_types(prog: Program):
                         seen_bases.add(base_key)
                         payload_desc = "no payload" if payload is None else f"payload={payload}"
                         msg_lines.append(f"  - {pretty}->{variant_name}  ({payload_desc})")
-                    msg_lines.append("")
-                    msg_lines.append("To fix, qualify the variant with its enum name:")
                     best = _pretty_enum_name(candidates[0][0])
-                    msg_lines.append(f"  - To choose a variant:  {best}->{variant_name}(...)")
+                    msg_lines += ["", "To fix, qualify the variant with its enum name:", f"  - To choose a variant:  {best}->{variant_name}(...)"]
                     bhumi_report_error(
                         getattr(expr, "lineno", None),
                         getattr(expr, "col", None),
@@ -8881,7 +8895,7 @@ def check_types(prog: Program):
             try:
                 inside = var_typ.split("[", 1)[1][:-1]
                 array_len = int(inside) if inside.isdigit() else None
-            except Exception:
+            except (ValueError, IndexError):
                 array_len = None
             if array_len is not None:
                 cval = eval_const_int(expr.index)
@@ -9488,7 +9502,7 @@ def check_types(prog: Program):
             try:
                 inside = var_type.split("[", 1)[1][:-1]
                 array_len = int(inside) if inside.isdigit() else None
-            except Exception:
+            except (ValueError, IndexError):
                 array_len = None
             if array_len is not None:
                 cval = eval_const_int(stmt.index)
@@ -9642,11 +9656,11 @@ def check_types(prog: Program):
             return
         if isinstance(stmt, Match):
             enum_typ = check_expr(stmt.expr)
-            enum_base = enum_typ.rstrip("*")
-            if "[" in enum_base and enum_base.endswith("]"):
-                enum_base = enum_base.split("[", 1)[0]
-            if "<" in enum_base:
-                enum_base = enum_base.split("<", 1)[0]
+            _enum_base = enum_typ.rstrip("*")
+            if "[" in _enum_base and _enum_base.endswith("]"):
+                _enum_base = _enum_base.split("[", 1)[0]
+            if "<" in _enum_base:
+                _enum_base = _enum_base.split("<", 1)[0]
             def _resolve_match_enum(raw_typ):
                 bare = raw_typ.rstrip("*")
                 if bare in enum_defs:
@@ -9662,7 +9676,7 @@ def check_types(prog: Program):
                                 mono2 = ensure_monomorph_for_enum(base2, param_list)
                                 conc_variants = enum_variant_map.get(mono2)
                                 return enum_defs[base2], conc_variants, mono2
-                            except Exception:
+                            except (KeyError, TypeError):
                                 pass
                         return enum_defs[base2], None, base2
                 mono_m2 = re.match(r"^([A-Za-z_]\w*)__mono__", bare)
@@ -9874,6 +9888,7 @@ class AsyncStateMachine:
         self.allocas: List[Tuple[str, str]] = []
         self.local_decls: List[Tuple[str, str]] = []
         self.promoted: set = set()
+        self.non_promoted_locals: List[Tuple[str, str]] = []
     def _expr_uses_name(self, e: Expr, name: str) -> bool:
         if e is None:
             return False
@@ -9911,7 +9926,7 @@ class AsyncStateMachine:
                 try:
                     if self._expr_uses_name(st.name, name):
                         return True
-                except Exception:
+                except (AttributeError, TypeError):
                     pass
             return self._expr_uses_name(st.expr, name)
         if isinstance(st, IfStmt):
@@ -10021,22 +10036,23 @@ class AsyncStateMachine:
                     if name in promoted:
                         break
         self.promoted = promoted
+    @staticmethod
     def _split_at_await(
-        self, stmt: Stmt
+        stmt: Stmt
     ) -> Tuple[List[str], Optional[AwaitExpr], List[str]]:
         if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, AwaitExpr):
-            return ([], stmt.expr, [])
+            return [], stmt.expr, []
         if isinstance(stmt, VarDecl) and isinstance(stmt.expr, AwaitExpr):
             llvm_ty = llvm_ty_of(stmt.typ)
             after_lines = [
                 f"  store {llvm_ty} %await_ret, {llvm_ty}* %{stmt.name}_addr"
             ]
-            return ([], stmt.expr, after_lines)
+            return [], stmt.expr, after_lines
         if isinstance(stmt, Assign) and isinstance(stmt.expr, AwaitExpr):
-            return ([], stmt.expr, [])
+            return [], stmt.expr, []
         if isinstance(stmt, ReturnStmt) and isinstance(stmt.expr, AwaitExpr):
-            return ([], stmt.expr, [])
-        return ([], None, [])
+            return [], stmt.expr, []
+        return [], None, []
     def _build_states(self):
         self.states = []
         self.allocas = list(self.allocas)
@@ -10131,7 +10147,7 @@ class AsyncStateMachine:
                         accum.append(f"  store {ret_ty} {tmp}, {ret_ty}* %ret_ptr")
                     accum.append("  ret i1 1")
                 else:
-                    self.codegen._gen_stmt(st, accum, llvm_ty_of(self.func.ret_type))
+                    gen_stmt(st, accum, llvm_ty_of(self.func.ret_type))
         if accum:
             self.states.append(list(accum))
     def generate(self) -> List[str]:
@@ -10169,7 +10185,7 @@ class AsyncStateMachine:
             try:
                 if not symbol_table.lookup(pname):
                     symbol_table.declare(pname, llvm_ty, pname)
-            except Exception:
+            except (AttributeError, KeyError):
                 pass
         local_types = [llvm_ty_of(t) for (t, n) in getattr(self, "local_decls", [])]
         ret_slot_ty = "i8" if ret_ty == "void" else ret_ty
@@ -10400,7 +10416,6 @@ def main():
     seen_names = {}
     for idx, fn in enumerate(final_prog.funcs):
         if fn.name in seen_names:
-            prev_idx = seen_names[fn.name]
             bhumi_report_error(
                 None,
                 None,
