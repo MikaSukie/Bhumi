@@ -276,8 +276,19 @@ def zero_const_for_llvm(llvm_t: str) -> str:
     return "0"
 def demangle_mononame(mononame: str) -> str:
     return mono_map.get(mononame, mononame)
+def _attach_pos(node: Any, tok: Optional[Token]) -> Any:
+    if tok is not None:
+        try:
+            setattr(node, "lineno", tok.line)
+            setattr(node, "col", tok.col)
+        except (AttributeError, TypeError):
+            pass
+    return node
 def ensure_monomorph_for_call(
-    base_name: str, actual_types: List[str], expected_ret: Optional[str] = None
+    base_name: str,
+    actual_types: List[str],
+    expected_ret: Optional[str] = None,
+    call_expr: Optional[Expr] = None,
 ) -> str:
     mangled_parts = [mangle_type(a) for a in actual_types]
     if expected_ret is not None:
@@ -291,7 +302,9 @@ def ensure_monomorph_for_call(
         base_fn = _candidate if _candidate and (_candidate.type_params or _candidate.ret_type == "#") else None
         if base_fn is None:
             bhumi_report_error(
-                None, None, f"Attempted to monomorph unknown function '{base_name}'"
+                getattr(call_expr, 'lineno', None) if call_expr is not None else None,
+                getattr(call_expr, 'col', None) if call_expr is not None else None,
+                f"Attempted to monomorph unknown function '{base_name}'",
             )
         new_ret = base_fn.ret_type
         if getattr(base_fn, "type_params", None) and new_ret in base_fn.type_params:
@@ -314,7 +327,7 @@ def ensure_monomorph_for_call(
                 f"{base_name}_resume", func_table[f"{mononame}_resume"]
             )
     return mononame
-def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
+def ensure_monomorph_for_enum(base_name: str, actual_types: List[str], lineno: Optional[int] = None, col: Optional[int] = None) -> str:
     mangled_parts = [mangle_type(a) for a in actual_types]
     if mangled_parts:
         mononame = f"{base_name}__mono__" + "_".join(mangled_parts)
@@ -324,9 +337,9 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
         return mononame
     template = original_enum_defs.get(base_name)
     if template is None:
-        bhumi_report_error(None, None, f"Attempted to monomorph unknown enum '{base_name}'")
+        bhumi_report_error(lineno, col, f"Attempted to monomorph unknown enum '{base_name}'")
     if len(template.type_params) != len(actual_types):
-        bhumi_report_error(None, None, f"Enum '{base_name}' expects {len(template.type_params)} type parameters, got {len(actual_types)}")
+        bhumi_report_error(lineno, col, f"Enum '{base_name}' expects {len(template.type_params)} type parameters, got {len(actual_types)}")
     subst: Dict[str, str] = {}
     for tp_name, actual in zip(template.type_params, actual_types):
         subst[tp_name] = actual
@@ -345,7 +358,7 @@ def ensure_monomorph_for_enum(base_name: str, actual_types: List[str]) -> str:
     if unresolved:
         bad = ", ".join(f"{vn}:{p}" for vn, p in unresolved)
         bhumi_report_error(
-            None, None,
+            lineno, col,
             f"Enum '{base_name}' monomorphisation with {actual_types} left unresolved "
             f"type parameters in variants: {bad}. "
             f"Make sure all type arguments are concrete types, not type-param names."
@@ -364,8 +377,8 @@ def ensure_monomorph_call(
     if base_fn and base_fn.ret_type == "#":
         if expected_ret is None:
             bhumi_report_error(
-                None,
-                None,
+                getattr(call_expr, 'lineno', None),
+                getattr(call_expr, 'col', None),
                 f"Cannot infer return type for '{call_expr.name}', no expected type provided",
             )
     if not base_fn:
@@ -393,8 +406,8 @@ def ensure_monomorph_call(
                 found = arg_types[0]
             if found is None:
                 bhumi_report_error(
-                    None,
-                    None,
+                    getattr(call_expr, 'lineno', None),
+                    getattr(call_expr, 'col', None),
                     f"Cannot infer type parameter '{tp}' for generic function '{call_expr.name}'",
                 )
             actuals.append(found)
@@ -576,8 +589,14 @@ def ensure_monomorph_call(
         new_body,
         base_fn.is_extern,
         base_fn.is_async,
+        base_fn.is_vasync,
+        list(getattr(base_fn, "vasync_except", None) or []),
+        is_variadic=getattr(base_fn, "is_variadic", False),
     )
     new_fn.take_params = set(getattr(base_fn, "take_params", None) or set())
+    new_fn.is_nown = getattr(base_fn, "is_nown", False)
+    new_fn.extern_init_name = getattr(base_fn, "extern_init_name", None)
+    new_fn.extern_resume_name = getattr(base_fn, "extern_resume_name", None)
     all_funcs.append(new_fn)
     _func_name_map[new_fn.name] = new_fn
     if new_ret == "#":
@@ -679,7 +698,7 @@ def _struct_c_abi_int(struct_name: str) -> Optional[str]:
             return None
     return {8: "i8", 16: "i16", 32: "i32", 64: "i64"}.get(total_bits)
 def emit_cast_value(
-    val: Optional[str], src_t: str, dst_t: str, out: List[str]
+    val: Optional[str], src_t: str, dst_t: str, out: List[str], lineno: Optional[int] = None, col: Optional[int] = None
 ) -> Optional[str]:
     if val is None:
         return None
@@ -758,14 +777,14 @@ def emit_cast_value(
         dst_struct = dst_llvm[len("%struct."):-1]
         if src_struct == dst_struct:
             bhumi_report_error(
-                None, None,
+                lineno, col,
                 f"Type mismatch: argument is '{src_t}' (struct value) but parameter expects "
                 f"'{dst_t}' (pointer to struct). "
                 f"Pass a pointer using the address-of operator: &myVar",
             )
         else:
             bhumi_report_error(
-                None, None,
+                lineno, col,
                 f"Type mismatch: argument is struct '{src_t}' but parameter expects pointer '{dst_t}'.",
             )
     _src_is_struct_ptr = src_llvm.startswith("%struct.") and src_llvm.endswith("*")
@@ -775,14 +794,14 @@ def emit_cast_value(
         dst_struct = dst_llvm[len("%struct."):-1]
         if src_struct == dst_struct:
             bhumi_report_error(
-                None, None,
+                lineno, col,
                 f"Type mismatch: argument is '{src_t}' (pointer to struct) but parameter expects "
                 f"'{dst_t}' (struct value). "
                 f"Dereference the pointer: *myPtr",
             )
         else:
             bhumi_report_error(
-                None, None,
+                lineno, col,
                 f"Type mismatch: argument is pointer '{src_t}' but parameter expects struct value '{dst_t}'.",
             )
     if src_llvm.startswith("%enum.") and src_llvm.endswith("*"):
@@ -915,10 +934,10 @@ def int_type_info(typ: str) -> Tuple[int, bool]:
     if llvm_name and llvm_name.startswith("i"):
         return int(llvm_name[1:]), False
     return 64, False
-def extract_array_base_type(llvm_ty: str) -> str:
+def extract_array_base_type(llvm_ty: str, lineno: Optional[int] = None, col: Optional[int] = None) -> str:
     match = re.match(r"\[\d+\s*x\s+(.+)]", llvm_ty)
     if not match:
-        bhumi_report_error(None, None, f"Cannot extract element type from: {llvm_ty}")
+        bhumi_report_error(lineno, col, f"Cannot extract element type from: {llvm_ty}")
     return match.group(1)
 def lex(source: str) -> List[Token]:
     tokens: List[Token] = []
@@ -1197,6 +1216,8 @@ class MatchCase:
     binding: Optional[str]
     body: List[Stmt]
     nested_pattern: Optional["MatchCase"] = None
+    lineno: Optional[int] = None
+    col: Optional[int] = None
 @dataclass
 class Match(Stmt):
     expr: Expr
@@ -1242,10 +1263,12 @@ class TypeofExpr(Expr):
     expr: Expr
 @dataclass
 class ContinueStmt(Stmt):
-    pass
+    lineno: Optional[int] = None
+    col: Optional[int] = None
 @dataclass
 class BreakStmt(Stmt):
-    pass
+    lineno: Optional[int] = None
+    col: Optional[int] = None
 @dataclass
 class Ternary(Expr):
     cond: Expr
@@ -1274,6 +1297,9 @@ class Func:
     is_variadic: bool = False
     is_nown: bool = False
     take_params: Optional[set] = None
+    extern_init_name: Optional[str] = None
+    extern_resume_name: Optional[str] = None
+    extern_free_name: Optional[str] = None
     def __post_init__(self):
         if self.vasync_except is None:
             self.vasync_except = []
@@ -1450,7 +1476,9 @@ class Parser:
                 decl = self.parse_var_decl()
                 if is_extern and decl.expr is not None:
                     bhumi_report_error(
-                        None, None, "extern globals cannot have initializers"
+                        getattr(decl.expr, "lineno", None),
+                        getattr(decl.expr, "col", None),
+                        "extern globals cannot have initializers"
                     )
                 globals.append(
                     GlobalVar(
@@ -1748,7 +1776,27 @@ class Parser:
         self.expect("LT")
         ret_type = self.parse_type()
         self.expect("GT")
+        extern_init_name = None
+        extern_resume_name = None
+        extern_free_name = None
         if is_extern:
+            while self.peek().kind == "BANG":
+                self.bump()
+                key_tok = self.expect("IDENT")
+                self.expect("EQUAL")
+                val_tok = self.expect("IDENT")
+                if key_tok.value == "_init":
+                    extern_init_name = val_tok.value
+                elif key_tok.value == "_resume":
+                    extern_resume_name = val_tok.value
+                elif key_tok.value == "_free":
+                    extern_free_name = val_tok.value
+                else:
+                    bhumi_report_error(
+                        key_tok.line,
+                        key_tok.col,
+                        f"Unknown extern async annotation '!{key_tok.value}=...'",
+                    )
             self.expect("SEMI")
             fn_ext = Func(
                 access,
@@ -1765,6 +1813,9 @@ class Parser:
             )
             fn_ext.is_nown = is_nown
             fn_ext.take_params = take_indices
+            fn_ext.extern_init_name = extern_init_name
+            fn_ext.extern_resume_name = extern_resume_name
+            fn_ext.extern_free_name = extern_free_name
             return fn_ext
         self.expect("LBRACE")
         body = self.parse_block()
@@ -1850,18 +1901,18 @@ class Parser:
         if t.kind == "CONTINUE":
             self.bump()
             self.expect("SEMI")
-            return ContinueStmt()
+            return ContinueStmt(t.line, t.col)
         if t.kind == "BREAK":
             self.bump()
             self.expect("SEMI")
-            return BreakStmt()
+            return BreakStmt(t.line, t.col)
         if t.kind == "RETURN":
             return self.parse_return()
         if t.kind == "TAKE":
             self.bump()
             name_tok = self.expect("IDENT")
             self.expect("SEMI")
-            return TakeStmt(name_tok.value)
+            return _attach_pos(TakeStmt(name_tok.value), name_tok)
         return self.parse_expr_stmt()
     def parse_typeswitch(self) -> TypeSwitch:
         self.expect("TYPESWITCH")
@@ -1929,7 +1980,7 @@ class Parser:
         op = compound_map[op_token.kind]
         lhs_var = Var(name)
         binop = BinOp(op, lhs_var, expr)
-        return Assign(name, binop)
+        return _attach_pos(Assign(name, binop), op_token)
     def parse_crumble(self) -> CrumbleStmt:
         self.expect("LPAREN")
         var_name = self.expect("IDENT").value
@@ -1943,8 +1994,10 @@ class Parser:
             var_name = var_name + "->" + part
         self.expect("RPAREN")
         max_r, max_w = None, None
+        kw_tok = self.tokens[self.pos - 1]
         while self.match("BANG"):
-            kw = self.expect("IDENT").value
+            kw_tok = self.expect("IDENT")
+            kw = kw_tok.value
             self.expect("EQUAL")
             val = int(self.expect("INT").value)
             if kw == "r":
@@ -1952,16 +2005,16 @@ class Parser:
             elif kw == "w":
                 max_w = val
             else:
-                bhumi_report_error(None, None, f"Unknown crumb kind '!{kw}'")
+                bhumi_report_error(kw_tok.line, kw_tok.col, f"Unknown crumb kind '!{kw}'")
         self.expect("SEMI")
-        return CrumbleStmt(var_name, max_r, max_w)
+        return _attach_pos(CrumbleStmt(var_name, max_r, max_w), kw_tok)
     def parse_ptr_assign(self) -> Stmt:
         self.expect("STAR")
         ptr_expr = self.parse_primary()
         self.expect("EQUAL")
         val_expr = self.parse_expr()
         self.expect("SEMI")
-        return Assign(UnaryDeref(ptr_expr), val_expr)
+        return _attach_pos(Assign(UnaryDeref(ptr_expr), val_expr), self.tokens[self.pos-1])
     def parse_forget(self) -> ForgetStmt:
         self.expect("IDENT")
         self.expect("LPAREN")
@@ -1986,7 +2039,7 @@ class Parser:
             case.body = body_stmts
             cases.append(case)
         self.expect("RBRACE")
-        return Match(expr_to_match, cases)
+        return _attach_pos(Match(expr_to_match, cases), self.tokens[self.pos-1])
     def _parse_match_case(self) -> "MatchCase":
         v_tok = self.expect("IDENT")
         variant_name = v_tok.value
@@ -2007,7 +2060,7 @@ class Parser:
                 )
             if self.peek().kind == "LPAREN":
                 self.bump()
-                inner_case = self._parse_match_case_inner(inner_name)
+                inner_case = self._parse_match_case_inner(inner_name, inner_tok.line, inner_tok.col)
                 self.expect("RPAREN")
                 nested_pattern = inner_case
                 binding_name = None
@@ -2019,17 +2072,17 @@ class Parser:
                     inner_tok.line, inner_tok.col,
                     f"Expected ')' or nested pattern after '{inner_name}' in match arm",
                 )
-        return MatchCase(variant=variant_name, binding=binding_name, body=[], nested_pattern=nested_pattern)
-    def _parse_match_case_inner(self, variant_name: str) -> "MatchCase":
+        return MatchCase(variant=variant_name, binding=binding_name, body=[], nested_pattern=nested_pattern, lineno=v_tok.line, col=v_tok.col)
+    def _parse_match_case_inner(self, variant_name: str, lineno: Optional[int] = None, col: Optional[int] = None) -> "MatchCase":
         if "__mono__" in variant_name:
-            bhumi_report_error(None, None, "Match variant names cannot contain '__mono__'.")
+            bhumi_report_error(lineno, col, "Match variant names cannot contain '__mono__'.")
         binding_name: Optional[str] = None
         nested_pattern: Optional[MatchCase] = None
         inner_tok = self.expect("IDENT")
         inner_name = inner_tok.value
         if self.peek().kind == "LPAREN":
             self.bump()
-            deeper = self._parse_match_case_inner(inner_name)
+            deeper = self._parse_match_case_inner(inner_name, inner_tok.line, inner_tok.col)
             self.expect("RPAREN")
             nested_pattern = deeper
         else:
@@ -2081,7 +2134,7 @@ class Parser:
         self.expect("EQUAL")
         value = self.parse_expr()
         self.expect("SEMI")
-        return IndexAssign(arr_name, index, value)
+        return _attach_pos(IndexAssign(arr_name, index, value), self.tokens[self.pos-1])
     def parse_field_assign(self) -> Assign:
         base_name = self.expect("IDENT").value
         self.expect("DOT")
@@ -2091,7 +2144,7 @@ class Parser:
         self.expect("SEMI")
         lvalue = FieldAccess(Var(base_name), field_name)
         if op_token.kind == "EQUAL":
-            return Assign(lvalue, expr)
+            return _attach_pos(Assign(lvalue, expr), op_token)
         compound_map = {
             "PLUSEQ": "+", "MINUSEQ": "-", "STAREQ": "*", "SLASHEQ": "/",
             "PERCENTEQ": "%", "ANDEQ": "&", "OREQ": "|", "XOREQ": "^",
@@ -2103,8 +2156,9 @@ class Parser:
                 op_token.line, op_token.col,
                 f"Unknown field assignment operator: {op_token.kind}",
             )
-        return Assign(lvalue, BinOp(op, FieldAccess(Var(base_name), field_name), expr))
+        return _attach_pos(Assign(lvalue, BinOp(op, FieldAccess(Var(base_name), field_name), expr)), op_token)
     def parse_if(self) -> IfStmt:
+        t = self.peek()
         self.expect("IF")
         self.expect("LPAREN")
         cond = self.parse_expr()
@@ -2120,8 +2174,9 @@ class Parser:
                 self.expect("LBRACE")
                 else_body = self.parse_block()
                 self.expect("RBRACE")
-        return IfStmt(cond, then_body, else_body)
+        return _attach_pos(IfStmt(cond, then_body, else_body), t)
     def parse_while(self) -> WhileStmt:
+        t = self.peek()
         self.expect("WHILE")
         self.expect("LPAREN")
         cond = self.parse_expr()
@@ -2129,18 +2184,20 @@ class Parser:
         self.expect("LBRACE")
         body = self.parse_block()
         self.expect("RBRACE")
-        return WhileStmt(cond, body)
+        return _attach_pos(WhileStmt(cond, body), t)
     def parse_return(self) -> ReturnStmt:
+        t = self.peek()
         self.expect("RETURN")
         expr = None
         if self.peek().kind != "SEMI":
             expr = self.parse_expr()
         self.expect("SEMI")
-        return ReturnStmt(expr)
+        return _attach_pos(ReturnStmt(expr), t)
     def parse_expr_stmt(self) -> ExprStmt:
+        t = self.peek()
         expr = self.parse_expr()
         self.expect("SEMI")
-        return ExprStmt(expr)
+        return _attach_pos(ExprStmt(expr), t)
     def parse_expr(self, min_prec: int = 0) -> Expr:
         left = self.parse_primary()
         while True:
@@ -2157,14 +2214,14 @@ class Parser:
                     break
                 self.bump()
                 right = self.parse_expr(op_prec + 1)
-                left = BinOp(op_token.value, left, right)
+                left = _attach_pos(BinOp(op_token.value, left, right), op_token)
                 continue
             if op_token.kind == "QUESTION" and min_prec == 0:
                 self.bump()
                 then_expr = self.parse_expr()
                 self.expect("COLON")
                 else_expr = self.parse_expr()
-                left = Ternary(left, then_expr, else_expr)
+                left = _attach_pos(Ternary(left, then_expr, else_expr), op_token)
                 continue
             break
         return left
@@ -2188,16 +2245,15 @@ class Parser:
                 t.line, t.col, f"Unexpected token while parsing expression: {t.kind}"
             )
         if self.peek().kind == "AWAIT":
+            await_tok = self.bump()
             if no_runtime:
-                t = self.peek()
                 bhumi_report_error(
-                    t.line,
-                    t.col,
+                    await_tok.line,
+                    await_tok.col,
                     "Cannot use async and/or runtime features with @nrt (No Run Time);",
                 )
-            self.bump()
             inner = self.parse_primary()
-            return AwaitExpr(inner)
+            return _attach_pos(AwaitExpr(inner), await_tok)
         if self.peek().kind == "TAKE":
             take_tok = self.bump()
             if self.peek().kind != "IDENT":
@@ -2206,27 +2262,27 @@ class Parser:
                     "Expected variable name after 'take'",
                 )
             name_tok = self.bump()
-            return TakeExpr(name_tok.value)
+            return _attach_pos(TakeExpr(name_tok.value), name_tok)
         if self.peek().kind == "STAR":
-            self.bump()
+            op_tok = self.bump()
             inner = self.parse_primary()
-            return UnaryDeref(inner)
+            return _attach_pos(UnaryDeref(inner), op_tok)
         if self.peek().kind == "AMP":
-            self.bump()
+            op_tok = self.bump()
             inner = self.parse_primary()
-            return AddressOf(inner)
+            return _attach_pos(AddressOf(inner), op_tok)
         if self.peek().kind == "BANG":
-            self.bump()
+            op_tok = self.bump()
             inner = self.parse_primary()
-            return UnaryOp("!", inner)
+            return _attach_pos(UnaryOp("!", inner), op_tok)
         if self.peek().kind == "MINUS":
-            self.bump()
+            op_tok = self.bump()
             inner = self.parse_primary()
-            return UnaryOp("-", inner)
+            return _attach_pos(UnaryOp("-", inner), op_tok)
         if self.peek().kind == "TILDE":
-            self.bump()
+            op_tok = self.bump()
             inner = self.parse_primary()
-            return UnaryOp("~", inner)
+            return _attach_pos(UnaryOp("~", inner), op_tok)
         def parse_atom() -> Expr:
             t = self.bump()
             if t.kind == "LBRACKET":
@@ -2237,7 +2293,7 @@ class Parser:
                         if not self.match("COMMA"):
                             break
                 self.expect("RBRACKET")
-                return ArrayInit(elems)
+                return _attach_pos(ArrayInit(elems), t)
             if (
                 t.kind == "IDENT"
                 and t.value == "typeof"
@@ -2246,28 +2302,28 @@ class Parser:
                 self.expect("LPAREN")
                 arg_expr = self.parse_expr()
                 self.expect("RPAREN")
-                return TypeofExpr(arg_expr)
+                return _attach_pos(TypeofExpr(arg_expr), t)
             if t.kind == "INT" and re.match(r"^[0-9]", t.value):
                 try:
-                    return IntLit(int(t.value, 0))
+                    return _attach_pos(IntLit(int(t.value, 0)), t)
                 except ValueError:
                     bhumi_report_error(
                         t.line, t.col, f"Invalid integer literal: {t.value}"
                     )
             if t.kind == "FLOAT" and re.match(r"^[0-9]", t.value):
-                return FloatLit(float(t.value), bits=64)
+                return _attach_pos(FloatLit(float(t.value), bits=64), t)
             if t.kind == "FLOAT32" and re.match(r"^[0-9]", t.value):
-                return FloatLit(float(t.value), bits=32)
+                return _attach_pos(FloatLit(float(t.value), bits=32), t)
             if t.kind == "STRING":
-                return StrLit(t.value)
+                return _attach_pos(StrLit(t.value), t)
             if t.kind == "CHAR":
-                return CharLit(t.value)
+                return _attach_pos(CharLit(t.value), t)
             if t.kind == "TRUE":
-                return BoolLit(True)
+                return _attach_pos(BoolLit(True), t)
             if t.kind == "FALSE":
-                return BoolLit(False)
+                return _attach_pos(BoolLit(False), t)
             if t.kind == "NULL":
-                return NullLit()
+                return _attach_pos(NullLit(), t)
             if t.kind == "LPAREN":
                 saved_pos = self.pos
                 _cast_type_name: Optional[str] = None
@@ -2297,12 +2353,12 @@ class Parser:
                         self.pos = saved_pos
                 if _cast_type_name is not None:
                     _inner_cast = self.parse_primary()
-                    return Cast(_cast_type_name, _inner_cast)
+                    return _attach_pos(Cast(_cast_type_name, _inner_cast), t)
                 expr = self.parse_expr()
                 self.expect("RPAREN")
-                return expr
+                return _attach_pos(expr, t)
             if t.kind == "IDENT" and t.value == "BhumiCompiler.get_args":
-                return Call("BhumiCompiler.get_args", [])
+                return _attach_pos(Call("BhumiCompiler.get_args", []), t)
             if t.kind == "IDENT":
                 ident_name = t.value
                 if self.peek().kind == "ARROW":
@@ -2314,7 +2370,7 @@ class Parser:
                         if self.peek().kind != "RPAREN":
                             args.append(self.parse_expr())
                         self.expect("RPAREN")
-                    return Call(f"{ident_name}->{variant_name}", args)
+                    return _attach_pos(Call(f"{ident_name}->{variant_name}", args), t)
                 base = Var(ident_name)
                 if self.peek().kind == "LBRACE":
                     self.bump()
@@ -2327,7 +2383,7 @@ class Parser:
                         self.expect("SEMI")
                         fields_list.append((fname, fexpr))
                     self.expect("RBRACE")
-                    return StructInit(t.value, fields_list)
+                    return _attach_pos(StructInit(t.value, fields_list), t)
                 if self.peek().kind == "LPAREN":
                     self.bump()
                     args: List[Expr] = []
@@ -2337,15 +2393,15 @@ class Parser:
                             if not self.match("COMMA"):
                                 break
                     self.expect("RPAREN")
-                    return Call(t.value, args)
+                    return _attach_pos(Call(t.value, args), t)
                 if self.peek().kind == "LBRACKET":
                     self.bump()
                     index_expr = self.parse_expr()
                     self.expect("RBRACKET")
-                    return Index(base, index_expr)
-                return base
+                    return _attach_pos(Index(base, index_expr), t)
+                return _attach_pos(base, t)
             if t.kind == "HASH":
-                return CallerType()
+                return _attach_pos(CallerType(), t)
             if t.kind in TYPE_TOKENS and t.kind != "IDENT":
                 bhumi_report_error(
                     t.line, t.col,
@@ -2355,9 +2411,9 @@ class Parser:
             bhumi_report_error(t.line, t.col, f"Unexpected token: {t.kind}")
         expr: Expr = parse_atom()
         while self.peek().kind == "DOT":
-            self.bump()
+            dot_tok = self.bump()
             field_name = self.expect("IDENT").value
-            expr = FieldAccess(expr, field_name)
+            expr = _attach_pos(FieldAccess(expr, field_name), dot_tok)
         return expr
 tmp_id = 0
 def new_tmp() -> str:
@@ -2578,6 +2634,41 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             cr["_deferred_frees"] = new_deferred
         else:
             cr.pop("_deferred_frees", None)
+    _empty_string_label = None
+    def _empty_string_ptr() -> str:
+        nonlocal _empty_string_label
+        if _empty_string_label is None:
+            _empty_string_label = f"@.str{len(string_constants)}"
+            string_constants.append(
+                f'{_empty_string_label} = private unnamed_addr constant [1 x i8] c"\\00"'
+            )
+        tmp = new_tmp()
+        out.append(
+            f"  {tmp} = getelementptr inbounds [1 x i8], [1 x i8]* {_empty_string_label}, i32 0, i32 0"
+        )
+        return tmp
+    def _nonnull_string_value(val: str) -> str:
+        null_chk = new_tmp()
+        sel = new_tmp()
+        empty_ptr = _empty_string_ptr()
+        out.append(f"  {null_chk} = icmp eq i8* {val}, null")
+        out.append(f"  {sel} = select i1 {null_chk}, i8* {empty_ptr}, i8* {val}")
+        return sel
+    def _clone_string_value(src_val: str) -> str:
+        src_nn = _nonnull_string_value(src_val)
+        len_tmp = new_tmp()
+        out.append(f"  {len_tmp} = call i64 @strlen(i8* {src_nn})")
+        size_tmp = new_tmp()
+        out.append(f"  {size_tmp} = add i64 {len_tmp}, 1")
+        raw_tmp = new_tmp()
+        out.append(f"  {raw_tmp} = call i8* @bhumi_malloc(i64 {size_tmp})")
+        out.append(
+            f"  call void @llvm.memcpy.p0i8.p0i8.i64(i8* {raw_tmp}, i8* {src_nn}, i64 {len_tmp}, i1 false)"
+        )
+        term_tmp = new_tmp()
+        out.append(f"  {term_tmp} = getelementptr inbounds i8, i8* {raw_tmp}, i64 {len_tmp}")
+        out.append(f"  store i8 0, i8* {term_tmp}")
+        return raw_tmp
     global string_constants
     if isinstance(expr, TakeExpr):
         _te_sym = symbol_table.lookup(expr.varname)
@@ -2664,7 +2755,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     return tmp
                 except ValueError:
                     bhumi_report_error(
-                        None, None, f"Cannot convert string '{inner.value}' to integer"
+                        getattr(inner, 'lineno', None), getattr(inner, 'col', None), f"Cannot convert string '{inner.value}' to integer"
                     )
             if dst_t == "float":
                 try:
@@ -2675,7 +2766,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     return tmp
                 except ValueError:
                     bhumi_report_error(
-                        None, None, f"Cannot convert string '{inner.value}' to float"
+                        getattr(inner, 'lineno', None), getattr(inner, 'col', None), f"Cannot convert string '{inner.value}' to float"
                     )
         val = gen_expr(inner, out)
         src_t = infer_type(inner)
@@ -2787,13 +2878,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             cast_tmp = new_tmp()
             out.append(f"  {cast_tmp} = ptrtoint i8* {relay} to {dst_llvm}")
             return cast_tmp
-        out.append(f"  ; NOTE: cast from {src_t} to {dst_t} not lowered, passing value as-is")
         return val
     if isinstance(expr, AwaitExpr):
         inner = expr.expr
         if isinstance(inner, Call):
             call_target = ensure_monomorph_call(inner, out)
             args_ir: List[str] = []
+            async_string_cleanup: List[str] = []
             concrete_fn = _func_name_map.get(call_target)
             if concrete_fn:
                 for a, (param_typ, _) in zip(inner.args, concrete_fn.params):
@@ -2804,8 +2895,14 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         args_ir.append(
                             f"{llvm_param_ty} {zero_const_for_llvm(llvm_param_ty)}"
                         )
+                        continue
+                    cast_tmp = emit_cast_value(tmpa, ty_a, param_typ, out, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
+                    if param_typ == "string":
+                        cast_tmp = _nonnull_string_value(cast_tmp)
+                        cloned_tmp = _clone_string_value(cast_tmp)
+                        async_string_cleanup.append(cloned_tmp)
+                        args_ir.append(f"{llvm_param_ty} {cloned_tmp}")
                     else:
-                        cast_tmp = emit_cast_value(tmpa, ty_a, param_typ, out)
                         args_ir.append(f"{llvm_param_ty} {cast_tmp}")
             else:
                 for a in inner.args:
@@ -2819,17 +2916,24 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             args_sig = ", ".join(args_ir)
             handle_tmp = new_tmp()
             struct_name = f"%async.{call_target}"
+            init_sym = f"{call_target}_init"
+            resume_sym = f"{call_target}_resume"
+            if concrete_fn:
+                if getattr(concrete_fn, "extern_init_name", None):
+                    init_sym = concrete_fn.extern_init_name
+                if getattr(concrete_fn, "extern_resume_name", None):
+                    resume_sym = concrete_fn.extern_resume_name
             if args_sig:
                 out.append(
-                    f"  {handle_tmp} = call {struct_name}* @{call_target}_init({args_sig})"
+                    f"  {handle_tmp} = call {struct_name}* @{init_sym}({args_sig})"
                 )
             else:
                 out.append(
-                    f"  {handle_tmp} = call {struct_name}* @{call_target}_init()"
+                    f"  {handle_tmp} = call {struct_name}* @{init_sym}()"
                 )
             done_tmp = new_tmp()
             out.append(
-                f"  {done_tmp} = call i1 @{call_target}_resume({struct_name}* {handle_tmp})"
+                f"  {done_tmp} = call i1 @{resume_sym}({struct_name}* {handle_tmp})"
             )
             cont_lbl = new_label("await_cont")
             suspend_lbl = new_label("await_suspend")
@@ -2837,7 +2941,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"{suspend_lbl}:")
             resume_ptr_tmp = new_tmp()
             out.append(
-                f"  {resume_ptr_tmp} = bitcast i1 ({struct_name}*)* @{call_target}_resume to i8*"
+                f"  {resume_ptr_tmp} = bitcast i1 ({struct_name}*)* @{resume_sym} to i8*"
             )
             handle_b_tmp = new_tmp()
             out.append(f"  {handle_b_tmp} = bitcast {struct_name}* {handle_tmp} to i8*")
@@ -2849,10 +2953,16 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"{cont_lbl}:")
             base_fn = _func_name_map.get(call_target)
             ret_llvm = llvm_ty_of(base_fn.ret_type) if base_fn else "i64"
+            is_extern_async = concrete_fn is not None and getattr(concrete_fn, "is_extern", False)
+            free_sym = getattr(concrete_fn, "extern_free_name", None) or (
+                "bhumi_ffi_free" if is_extern_async else "bhumi_safe_c_free"
+            )
             _handle_free_tmp = new_tmp()
             out.append(f"  {_handle_free_tmp} = bitcast {struct_name}* {handle_tmp} to i8*")
             if ret_llvm == "void":
-                out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
+                out.append(f"  call void @{free_sym}(i8* {_handle_free_tmp})")
+                for _tmp in async_string_cleanup:
+                    out.append(f"  call void @bhumi_safe_c_free(i8* {_tmp})")
                 return None
             res_ptr = new_tmp()
             out.append(
@@ -2860,11 +2970,12 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             )
             await_ret = new_tmp()
             out.append(f"  {await_ret} = load {ret_llvm}, {ret_llvm}* {res_ptr}")
-            out.append(f"  call void @bhumi_free(i8* {_handle_free_tmp})")
+            out.append(f"  call void @{free_sym}(i8* {_handle_free_tmp})")
+            for _tmp in async_string_cleanup:
+                out.append(f"  call void @bhumi_safe_c_free(i8* {_tmp})")
             return await_ret
         else:
-            out.append("  ; await of non-call expression is not supported here")
-            return None
+            bhumi_report_error(getattr(expr, "lineno", None), getattr(expr, "col", None), "await of non-call expression is not supported here")
     if isinstance(expr, UnaryOp):
         val = gen_expr(expr.expr, out)
         ty = infer_type(expr.expr)
@@ -2900,16 +3011,16 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 return tmp
             else:
                 bhumi_report_error(
-                    None, None, f"Unary '~' requires integer operand, found {ty}"
+                    getattr(expr, 'lineno', None), getattr(expr, 'col', None), f"Unary '~' requires integer operand, found {ty}"
                 )
         else:
-            bhumi_report_error(None, None, f"Unsupported unary operator: {expr.op}")
+            bhumi_report_error(getattr(expr, 'lineno', None), getattr(expr, 'col', None), f"Unsupported unary operator: {expr.op}")
     if isinstance(expr, UnaryDeref):
         ptr_val = gen_expr(expr.ptr, out)
         ptr_type = infer_type(expr.ptr)
         if not ptr_type.endswith("*"):
             bhumi_report_error(
-                None, None, f"Dereferencing non-pointer type '{ptr_type}'"
+                getattr(expr, 'lineno', None), getattr(expr, 'col', None), f"Dereferencing non-pointer type '{ptr_type}'"
             )
         pointee_lang = ptr_type[:-1]
         if pointee_lang == "void":
@@ -3159,7 +3270,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 out.append(f"  unreachable")
                 out.append(f"{ok_lbl}:")
                 gep_tmp = new_tmp()
-                base_ty = extract_array_base_type(llvm_ty)
+                base_ty = extract_array_base_type(llvm_ty, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                 out.append(
                     f"  {gep_tmp} = getelementptr inbounds {base_ty}, {base_ty}* {ptr_load}, i32 {idx_cast}"
                 )
@@ -3273,7 +3384,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 f"Undefined array: {var_name}",
             )
         llvm_ty, name = arr_info
-        base_ty = extract_array_base_type(llvm_ty)
+        base_ty = extract_array_base_type(llvm_ty, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
         tmp_ptr = new_tmp()
         tmp_val = new_tmp()
         idx_ty = infer_type(expr.index)
@@ -3413,10 +3524,12 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         rhs = gen_expr(expr.right, out)
         ty = lt
         if ty == "string" and expr.op == "+":
+            lhs_nn = _nonnull_string_value(lhs)
+            rhs_nn = _nonnull_string_value(rhs)
             len_l = new_tmp()
-            out.append(f"  {len_l} = call i64 @strlen(i8* {lhs})")
+            out.append(f"  {len_l} = call i64 @strlen(i8* {lhs_nn})")
             len_r = new_tmp()
-            out.append(f"  {len_r} = call i64 @strlen(i8* {rhs})")
+            out.append(f"  {len_r} = call i64 @strlen(i8* {rhs_nn})")
             total = new_tmp()
             out.append(f"  {total} = add i64 {len_l}, {len_r}")
             alloc_size = new_tmp()
@@ -3425,7 +3538,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  {raw} = call i8* @malloc(i64 {alloc_size})")
             out.append(
                 f"  call void @llvm.memcpy.p0i8.p0i8.i64("
-                f"i8* {raw}, i8* {lhs}, i64 {len_l}, i1 false)"
+                f"i8* {raw}, i8* {lhs_nn}, i64 {len_l}, i1 false)"
             )
             dest_rhs = new_tmp()
             out.append(
@@ -3433,7 +3546,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             )
             out.append(
                 f"  call void @llvm.memcpy.p0i8.p0i8.i64("
-                f"i8* {dest_rhs}, i8* {rhs}, i64 {len_r}, i1 false)"
+                f"i8* {dest_rhs}, i8* {rhs_nn}, i64 {len_r}, i1 false)"
             )
             term_ptr = new_tmp()
             out.append(
@@ -3521,10 +3634,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         if common_t is None:
             common_t = _c_promote_types(lt, rt)
         llvm_ty = llvm_ty_of(common_t)
-        cast_lhs = emit_cast_value(lhs, lt, common_t, out)
+        cast_lhs = emit_cast_value(lhs, lt, common_t, out, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
         if cast_lhs:
             lhs = cast_lhs
-        cast_rhs = emit_cast_value(rhs, rt, common_t, out)
+        cast_rhs = emit_cast_value(rhs, rt, common_t, out, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
         if cast_rhs:
             rhs = cast_rhs
         tmp = new_tmp()
@@ -3766,7 +3879,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 if found_variant_payload is not None and isinstance(found_variant_payload, str):
                     if len(template.type_params) == 1:
                         if not arg_types:
-                            bhumi_report_error(None, None, f"Cannot infer type parameter for enum {found_enum}; no args provided")
+                            bhumi_report_error(getattr(expr, 'lineno', None), getattr(expr, 'col', None), f"Cannot infer type parameter for enum {found_enum}; no args provided")
                         actuals = [arg_types[0]]
                     else:
                         actuals_from_exp = _actuals_from_expected(expected, found_enum, template.type_params)
@@ -3776,7 +3889,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                             for tp in template.type_params:
                                 if found_variant_payload == tp:
                                     if not arg_types:
-                                        bhumi_report_error(None, None, f"Cannot infer type parameter '{tp}' for enum {found_enum}; no args provided")
+                                        bhumi_report_error(getattr(expr, 'lineno', None), getattr(expr, 'col', None), f"Cannot infer type parameter '{tp}' for enum {found_enum}; no args provided")
                                     actuals.append(arg_types[0])
                                 else:
                                     actuals.append(tp)
@@ -3785,7 +3898,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     if actuals_from_exp is not None:
                         actuals = actuals_from_exp
                 if actuals and all(isinstance(a, str) and not re.fullmatch(r"[A-Z]\w*", a) for a in actuals):
-                    mononame = ensure_monomorph_for_enum(found_enum, actuals)
+                    mononame = ensure_monomorph_for_enum(found_enum, actuals, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                     variants = enum_variant_map.get(mononame)
                     if variants:
                         _, payload = variants[found_variant_idx]
@@ -3794,7 +3907,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 elif actuals and expected is not None:
                     actuals_from_exp = _actuals_from_expected(expected, found_enum, template.type_params)
                     if actuals_from_exp is not None:
-                        mononame = ensure_monomorph_for_enum(found_enum, actuals_from_exp)
+                        mononame = ensure_monomorph_for_enum(found_enum, actuals_from_exp, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                         variants = enum_variant_map.get(mononame)
                         if variants:
                             _, payload = variants[found_variant_idx]
@@ -3822,7 +3935,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                         isinstance(a, str) and not re.fullmatch(r"[A-Z]\w*", a)
                         for a in _final_actuals
                     ):
-                        mononame = ensure_monomorph_for_enum(found_enum, _final_actuals)
+                        mononame = ensure_monomorph_for_enum(found_enum, _final_actuals, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                         variants = enum_variant_map.get(mononame)
                         if variants:
                             _, payload = variants[found_variant_idx]
@@ -3931,7 +4044,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         concrete_fn = _func_name_map.get(call_target)
         if concrete_fn and (concrete_fn.is_async or getattr(concrete_fn, "is_vasync", False)):
             bhumi_report_error(
-                None, None, f"async function '{expr.name}' must be awaited"
+                getattr(expr, 'lineno', None), getattr(expr, 'col', None), f"async function '{expr.name}' must be awaited"
             )
         def _promote_variadic_and_emit(a_val, a_ty, out):
             if a_ty in ("float", "float32"):
@@ -3939,7 +4052,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 llvm_ty = llvm_ty_of(target_bhumi_ty)
                 if a_val is None:
                     return llvm_ty, zero_const_for_llvm(llvm_ty)
-                promoted = emit_cast_value(a_val, a_ty, target_bhumi_ty, out)
+                promoted = emit_cast_value(a_val, a_ty, target_bhumi_ty, out, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                 return llvm_ty, promoted
             small_int_names = {
                 "i8",
@@ -3964,23 +4077,38 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 llvm_ty = llvm_ty_of(target_bhumi_ty)
                 if a_val is None:
                     return llvm_ty, zero_const_for_llvm(llvm_ty)
-                promoted = emit_cast_value(a_val, a_ty, target_bhumi_ty, out)
+                promoted = emit_cast_value(a_val, a_ty, target_bhumi_ty, out, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                 return llvm_ty, promoted
             llvm_ty = llvm_ty_of(a_ty)
             if a_val is None:
                 return llvm_ty, zero_const_for_llvm(llvm_ty)
             return llvm_ty, a_val
         args_ir = []
-        def _emit_call_arg(a_val, a_ty, param_typ, fn_for_extern):
+        def _emit_call_arg(a_expr, a_val, a_ty, param_typ, fn_for_extern, is_take=False):
             llvm_param_ty = llvm_ty_of(param_typ)
             is_extern_call = fn_for_extern is not None and getattr(fn_for_extern, "is_extern", False)
+            if param_typ == "string" and is_take:
+                if a_val is None:
+                    return "i8*", _clone_string_value(_empty_string_ptr())
+                is_owned_source = (
+                    (isinstance(a_expr, Var) and a_expr.name in owned_vars)
+                    or isinstance(a_expr, TakeExpr)
+                    or _is_heap_string_temp(a_expr)
+                )
+                if is_owned_source:
+                    return "i8*", _nonnull_string_value(a_val)
+                return "i8*", _clone_string_value(a_val)
             if a_val is None:
+                if param_typ == "string":
+                    return "i8*", _empty_string_ptr()
                 if is_extern_call and llvm_param_ty.startswith("%struct.") and not llvm_param_ty.endswith("*"):
                     abi_int = _struct_c_abi_int(llvm_param_ty[len("%struct."):])
                     if abi_int:
                         return abi_int, "0"
                 return llvm_param_ty, zero_const_for_llvm(llvm_param_ty)
             cast_tmp = emit_cast_value(a_val, a_ty, param_typ, out)
+            if param_typ == "string":
+                cast_tmp = _nonnull_string_value(cast_tmp)
             if is_extern_call and llvm_param_ty.startswith("%struct.") and not llvm_param_ty.endswith("*"):
                 abi_int = _struct_c_abi_int(llvm_param_ty[len("%struct."):])
                 if abi_int:
@@ -3994,10 +4122,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                     return abi_int, int_val
             return llvm_param_ty, cast_tmp
         if concrete_fn:
-            for (param_typ, _), a_val, a_ty in zip(
-                concrete_fn.params, arg_vals, arg_types
+            _take_params = getattr(concrete_fn, "take_params", None) or set()
+            for idx, ((param_typ, _), a_val, a_ty, arg_expr) in enumerate(
+                zip(concrete_fn.params, arg_vals, arg_types, expr.args)
             ):
-                emit_ty, emit_val = _emit_call_arg(a_val, a_ty, param_typ, concrete_fn)
+                emit_ty, emit_val = _emit_call_arg(
+                    arg_expr, a_val, a_ty, param_typ, concrete_fn, idx in _take_params
+                )
                 args_ir.append(f"{emit_ty} {emit_val}")
             if getattr(concrete_fn, "is_variadic", False):
                 fixed_count = len(concrete_fn.params)
@@ -4009,8 +4140,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         else:
             fn_def = next((f for f in all_funcs if f.name == expr.name), None)
             if fn_def is not None and getattr(fn_def, "params", None):
-                for (param_typ, _), a_val, a_ty in zip(fn_def.params, arg_vals, arg_types):
-                    emit_ty, emit_val = _emit_call_arg(a_val, a_ty, param_typ, fn_def)
+                _take_params = getattr(fn_def, "take_params", None) or set()
+                for idx, ((param_typ, _), a_val, a_ty, arg_expr) in enumerate(
+                    zip(fn_def.params, arg_vals, arg_types, expr.args)
+                ):
+                    emit_ty, emit_val = _emit_call_arg(
+                        arg_expr, a_val, a_ty, param_typ, fn_def, idx in _take_params
+                    )
                     args_ir.append(f"{emit_ty} {emit_val}")
                 if getattr(fn_def, "is_variadic", False):
                     fixed_count = len(fn_def.params)
@@ -4112,11 +4248,13 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                                 ]
                             return ""
             out.append(f"  call void @{call_target}({', '.join(args_ir)})")
-            for arg_expr, arg_val in zip(expr.args, arg_vals):
+            _call_take_params = getattr(concrete_fn, "take_params", None) or set()
+            for arg_idx, (arg_expr, arg_val) in enumerate(zip(expr.args, arg_vals)):
                 _maybe_flush_deferred(arg_expr, arg_val)
                 try:
                     if (
-                        arg_val is not None
+                        arg_idx not in _call_take_params
+                        and arg_val is not None
                         and infer_type(arg_expr) == "string"
                         and isinstance(arg_expr, BinOp)
                         and arg_expr.op == "+"
@@ -4192,9 +4330,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp2})")
                 out.append(f"  br label %{_ins_skip}")
                 out.append(f"{_ins_skip}:")
-            for arg_expr, arg_val in zip(expr.args, arg_vals):
+            _call_take_params = getattr(concrete_fn, "take_params", None) or set()
+            for arg_idx, (arg_expr, arg_val) in enumerate(zip(expr.args, arg_vals)):
                 _maybe_flush_deferred(arg_expr, arg_val)
-                if infer_type(arg_expr) == "string":
+                if infer_type(arg_expr) == "string" and arg_idx not in _call_take_params:
                     _emit_free_if_temp(arg_expr, arg_val)
             _tp_fn_nv = _func_name_map.get(call_target)
             if _tp_fn_nv is None and "__mono__" in call_target:
@@ -4372,7 +4511,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             for field_name, field_expr in expr.fields:
                 if field_name not in field_dict:
                     bhumi_report_error(
-                        None, None, f"Field '{field_name}' not in struct '{struct_name}'"
+                        getattr(field_expr, 'lineno', None), getattr(field_expr, 'col', None), f"Field '{field_name}' not in struct '{struct_name}'"
                     )
                 field_llvm = llvm_ty_of(field_dict[field_name])
                 fval = gen_expr(field_expr, out)
@@ -4403,7 +4542,7 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         for field_name, field_expr in expr.fields:
             if field_name not in field_dict:
                 bhumi_report_error(
-                    None, None, f"Field '{field_name}' not in struct '{struct_name}'"
+                    getattr(field_expr, 'lineno', None), getattr(field_expr, 'col', None), f"Field '{field_name}' not in struct '{struct_name}'"
                 )
             field_type = field_dict[field_name]
             field_llvm = llvm_ty_of(field_type)
@@ -4661,7 +4800,7 @@ def infer_type(expr: Expr) -> str:
             if _tparams and payload is not None and payload in _tparams and expr.args:
                 if len(_tparams) == 1:
                     _actual_t = infer_type(expr.args[0])
-                    _mono = ensure_monomorph_for_enum(ename, [_actual_t])
+                    _mono = ensure_monomorph_for_enum(ename, [_actual_t], getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                     return _mono + "*"
                 else:
                     _orig_edef2 = original_enum_defs.get(ename)
@@ -4675,7 +4814,7 @@ def infer_type(expr: Expr) -> str:
                                     if _vv.typ == _tp2 and len(_arg_types2) > 0:
                                         _actuals2[_pi] = _arg_types2[0]
                         if all(a is not None for a in _actuals2):
-                            _mono2 = ensure_monomorph_for_enum(ename, _actuals2)
+                            _mono2 = ensure_monomorph_for_enum(ename, _actuals2, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                             return _mono2 + "*"
                     return ename + "*"
             if type_map.get(ename, "").startswith("i") and payload is None:
@@ -4736,7 +4875,7 @@ def infer_type(expr: Expr) -> str:
                             f"Cannot infer type parameter '{tp}' for generic function '{expr.name}'",
                         )
                     actuals.append(found)
-                _mononame = ensure_monomorph_for_call(expr.name, actuals)
+                _mononame = ensure_monomorph_for_call(expr.name, actuals, call_expr=expr)
                 new_ret = fn.ret_type
                 if new_ret in fn.type_params:
                     idx = fn.type_params.index(new_ret)
@@ -4752,11 +4891,11 @@ def infer_type(expr: Expr) -> str:
         arr_name = expr.array.name
         arr_info = symbol_table.lookup(arr_name)
         if not arr_info:
-            bhumi_report_error(None, None, f"Undefined array: {arr_name}")
+            bhumi_report_error(getattr(expr.array, 'lineno', None), getattr(expr.array, 'col', None), f"Undefined array: {arr_name}")
         llvm_ty, _ = arr_info
         if not (llvm_ty.startswith("[") and " x " in llvm_ty and llvm_ty.endswith("]")):
             bhumi_report_error(
-                None, None, f"Attempting to index non-array type '{llvm_ty}'"
+                getattr(expr.array, 'lineno', None), getattr(expr.array, 'col', None), f"Attempting to index non-array type '{llvm_ty}'"
             )
         inside = llvm_ty[1:-1]
         elem_llvm = inside.split(" x ")[1]
@@ -5137,7 +5276,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 return
             if src_llvm.endswith("*") and not llvm_ty.endswith("*"):
                 bhumi_report_error(
-                    None, None, f"Type error: cannot assign pointer {src_llvm} into non-pointer {llvm_ty}"
+                    getattr(stmt, 'lineno', None), getattr(stmt, 'col', None), f"Type error: cannot assign pointer {src_llvm} into non-pointer {llvm_ty}"
                 )
             if src_llvm != llvm_ty:
                 cast_tmp = new_tmp()
@@ -5381,7 +5520,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             _expr_llvm_ty = llvm_ty_of(infer_type(stmt.expr))
             if _expr_llvm_ty != llvm_ty and val is not None:
                 assert llvm_ty is not None
-                _coerced = emit_cast_value(val, infer_type(stmt.expr), llvm_to_lang(llvm_ty), out)
+                _coerced = emit_cast_value(val, infer_type(stmt.expr), llvm_to_lang(llvm_ty), out, getattr(stmt.expr, 'lineno', None), getattr(stmt.expr, 'col', None))
                 if _coerced is not None:
                     val = _coerced
             out.append(f"  store {llvm_ty} {val}, {llvm_ty}* {addr_token}")
@@ -5429,7 +5568,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     crumb_runtime[vn]["owned"] = True
     elif isinstance(stmt, ContinueStmt):
         if not loop_stack:
-            bhumi_report_error(None, None, "`continue` used outside of a loop")
+            bhumi_report_error(getattr(stmt, 'lineno', None), getattr(stmt, 'col', None), "`continue` used outside of a loop")
         head_lbl = loop_stack[-1]["continue"]
         out.append(f"  br label %{head_lbl}")
         out.append("  unreachable")
@@ -5447,7 +5586,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         return
     elif isinstance(stmt, BreakStmt):
         if not loop_stack:
-            bhumi_report_error(None, None, "`break` used outside of a loop")
+            bhumi_report_error(getattr(stmt, 'lineno', None), getattr(stmt, 'col', None), "`break` used outside of a loop")
         break_lbl = loop_stack[-1]["break"]
         out.append(f"  br label %{break_lbl}")
         out.append("  unreachable")
@@ -5455,7 +5594,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
         idx = gen_expr(stmt.index, out)
         val = gen_expr(stmt.value, out)
         llvm_ty, name = symbol_table.lookup(stmt.array)
-        base_ty = extract_array_base_type(llvm_ty)
+        base_ty = extract_array_base_type(llvm_ty, getattr(stmt, 'lineno', None), getattr(stmt, 'col', None))
         idx_ty = infer_type(stmt.index)
         idx_llvm = type_map[idx_ty]
         if idx_llvm != "i32":
@@ -5750,7 +5889,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     val = bt
                 out.append(f"  ret {ret_ty} {val}")
             else:
-                cast_tmp = emit_cast_value(val, src_lang, dst_lang, out)
+                cast_tmp = emit_cast_value(val, src_lang, dst_lang, out, getattr(stmt, 'lineno', None), getattr(stmt, 'col', None))
                 if cast_tmp is None:
                     cast_tmp = val
                 out.append(f"  ret {ret_ty} {cast_tmp}")
@@ -5990,7 +6129,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     inner_enum_name = inner_enum_name[len("%struct."):]
                 if inner_enum_name not in enum_variant_map:
                     bhumi_report_error(
-                        None, None,
+                        getattr(case, 'lineno', None), getattr(case, 'col', None),
                         f"Nested match: type '{inner_enum_name}' is not a known enum. "
                         f"Only enum types can be nested in match patterns."
                     )
@@ -6012,7 +6151,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                 )
                 if inner_variant_info is None:
                     bhumi_report_error(
-                        None, None,
+                        getattr(inner_case, 'lineno', None), getattr(inner_case, 'col', None),
                         f"Nested match: unknown variant '{inner_case.variant}' "
                         f"for inner enum '{inner_enum_name}'"
                     )
@@ -6293,6 +6432,41 @@ def gen_func(fn: Func) -> List[str]:
             getattr(fn, "col", None),
             "extern functions cannot use '#' as a return type",
         )
+    if fn.is_extern and (fn.is_async or getattr(fn, "is_vasync", False)):
+        if getattr(fn, "is_vasync", False):
+            bhumi_report_error(
+                getattr(fn, "lineno", None),
+                getattr(fn, "col", None),
+                "extern vasync functions are not supported yet; use plain extern async or a normal async wrapper.",
+            )
+        if fn.is_variadic:
+            bhumi_report_error(
+                getattr(fn, "lineno", None),
+                getattr(fn, "col", None),
+                "extern async functions cannot be variadic.",
+            )
+        def _extern_param_llvm(t: str) -> str:
+            lt = llvm_ty_of(t)
+            if lt.startswith("%struct.") and not lt.endswith("*"):
+                abi_int = _struct_c_abi_int(lt[len("%struct."):])
+                if abi_int:
+                    return abi_int
+            return lt
+        param_sig = ", ".join(f"{_extern_param_llvm(t)} %{n}" for t, n in fn.params)
+        ret_ty = llvm_ty_of(fn.ret_type)
+        st_ty = f"%async.{fn.name}"
+        init_name = fn.extern_init_name or f"{fn.name}_init"
+        resume_name = fn.extern_resume_name or f"{fn.name}_resume"
+        fields = ["i32", ("i8" if ret_ty == "void" else ret_ty)] + [
+            llvm_ty_of(t) for t, _ in fn.params
+        ]
+        lines = [f"{st_ty} = type {{ {', '.join(fields)} }}", f"declare {st_ty}* @{init_name}({param_sig})", f"declare i1 @{resume_name}({st_ty}* %sm)"]
+        generated_mono[fn.name] = True
+        func_table[fn.name] = ret_ty
+        func_table[init_name] = f"{st_ty}*"
+        func_table[resume_name] = "i1"
+        _restore_outer()
+        return lines
     if fn.is_extern:
         def _extern_param_llvm(t: str) -> str:
             lt = llvm_ty_of(t)
@@ -8690,7 +8864,7 @@ def check_types(prog: Program):
                         if _actuals_retry is not None and all(
                             t not in _type_params for t in _actuals_retry
                         ):
-                            _retry_mono = ensure_monomorph_for_enum(_mono_base, _actuals_retry)
+                            _retry_mono = ensure_monomorph_for_enum(_mono_base, _actuals_retry, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                             _retry_variants = enum_variant_map.get(_retry_mono, [])
                             _retry_payload = next(
                                 (p for n, p in _retry_variants if n == variant_name), None
@@ -8716,7 +8890,7 @@ def check_types(prog: Program):
                     if _type_params and payload in _type_params:
                         actual_arg_t = arg_types[0]
                         if len(_type_params) == 1:
-                            mono_name = ensure_monomorph_for_enum(enum_name, [actual_arg_t])
+                            mono_name = ensure_monomorph_for_enum(enum_name, [actual_arg_t], getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                             return mono_name
                         else:
                             actuals_ce = None
@@ -8742,7 +8916,7 @@ def check_types(prog: Program):
                                         if all(r is not None for r in res_ce):
                                             actuals_ce = res_ce
                             if actuals_ce is not None:
-                                mono_name = ensure_monomorph_for_enum(enum_name, actuals_ce)
+                                mono_name = ensure_monomorph_for_enum(enum_name, actuals_ce, getattr(expr, 'lineno', None), getattr(expr, 'col', None))
                                 return mono_name
                             return enum_name
                     if (
@@ -9673,7 +9847,7 @@ def check_types(prog: Program):
                         if params_m:
                             param_list = [p.strip() for p in params_m.group(1).split(",")]
                             try:
-                                mono2 = ensure_monomorph_for_enum(base2, param_list)
+                                mono2 = ensure_monomorph_for_enum(base2, param_list, getattr(stmt.expr, 'lineno', None), getattr(stmt.expr, 'col', None))
                                 conc_variants = enum_variant_map.get(mono2)
                                 return enum_defs[base2], conc_variants, mono2
                             except (KeyError, TypeError):
@@ -10105,11 +10279,14 @@ class AsyncStateMachine:
                                 arg_tokens.append(f"i64 {arg_tmp}")
                     args_ir = ", ".join(arg_tokens)
                     struct_name = f"%async.{call_target}"
+                    callee_fn = next((f for f in all_funcs if f.name == call_target), None)
+                    init_sym = getattr(callee_fn, "extern_init_name", None) or f"{call_target}_init"
+                    resume_sym = getattr(callee_fn, "extern_resume_name", None) or f"{call_target}_resume"
                     accum.append(
-                        f"  %await_handle = call {struct_name}* @{call_target}_init({args_ir})"
+                        f"  %await_handle = call {struct_name}* @{init_sym}({args_ir})"
                     )
                     accum.append(
-                        f"  %await_done = call i1 @{call_target}_resume({struct_name}* %await_handle)"
+                        f"  %await_done = call i1 @{resume_sym}({struct_name}* %await_handle)"
                     )
                     suspend_lbl = new_label("await_suspend")
                     cont_lbl = new_label("await_cont")
@@ -10448,7 +10625,11 @@ def main():
             "No startpoint: no main function found. Add a 'fn main(...) <...>' function, or use @nomain; to suppress emission of the wrapper startpoint.",
         )
     for fn in final_prog.funcs:
-        if getattr(fn, "is_async", False) and (fn.body is None or len(fn.body) == 0):
+        if (
+            getattr(fn, "is_async", False)
+            and not getattr(fn, "is_extern", False)
+            and (fn.body is None or len(fn.body) == 0)
+        ):
             bhumi_report_error(
                 None,
                 None,
