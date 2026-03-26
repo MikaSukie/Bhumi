@@ -45,9 +45,38 @@ def bhumi_report_error(
             col0 = _visual_col(raw_line, col)
         else:
             col0 = 0
+        inferred = int(length or 1)
+        if inferred < 1:
+            inferred = 1
+        if inferred == 1 and col is not None and col > 0:
+            idx = col - 1
+            if 0 <= idx < len(raw_line):
+                ch = raw_line[idx]
+                if ch.isalnum() or ch in {"_", "@"}:
+                    end = idx + 1
+                    while end < len(raw_line) and (
+                        raw_line[end].isalnum() or raw_line[end] in {"_", "@"}
+                    ):
+                        end += 1
+                    inferred = end - idx if end - idx > inferred else inferred
+                else:
+                    _multi_ops = [
+                        op
+                        for op in (
+                            "<<=", ">>=", "==", "!=", "<=", ">=",
+                            "<<", ">>", "+=", "-=",
+                            "*=", "/=", "%=",
+                            "&=", "|=", "^=",
+                            "&&", "||", "->",
+                        )
+                        if raw_line.startswith(op, idx)
+                    ]
+                    if _multi_ops:
+                        op_len = max(len(op) for op in _multi_ops)
+                        inferred = op_len if op_len > inferred else inferred
         pointer = " " * len(prefix) + " " * col0 + "^"
-        if length and length > 1:
-            pointer += "~" * (length - 1)
+        if inferred > 1:
+            pointer += "~" * (inferred - 1)
         print(pointer)
     sys.exit(1)
 _llvm_to_lang_cache: Dict[str, str] = {}
@@ -1362,10 +1391,12 @@ class Parser:
     def expect(self, kind: str) -> Token:
         if self.peek().kind == kind:
             return self.bump()
+        tok = self.peek()
         bhumi_report_error(
-            self.peek().line,
-            self.peek().col,
-            f"Expected {kind}, got {self.peek().kind}",
+            tok.line,
+            tok.col,
+            f"Expected {kind}, got {tok.kind}",
+            max(1, len(tok.value)) if getattr(tok, "value", None) is not None else 1,
         )
     def match(self, kind: str) -> bool:
         if self.peek().kind == kind:
