@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """ [-GPL2.0 license-] """
+from __future__ import annotations
 import argparse
 import os
 import re
@@ -317,7 +318,7 @@ def ensure_monomorph_for_call(
     base_name: str,
     actual_types: List[str],
     expected_ret: Optional[str] = None,
-    call_expr: Optional[Expr] = None,
+    call_expr: Optional["Expr"] = None,
 ) -> str:
     mangled_parts = [mangle_type(a) for a in actual_types]
     if expected_ret is not None:
@@ -7023,6 +7024,68 @@ def annotate_types(prog: Program) -> None:
         for stmt in (fn.body or []):
             _ann_stmt(stmt, fn.ret_type)
         ann_env.pop()
+def _try_literal_llvm_val(expr, field_ty: str):
+    ft = llvm_ty_of(field_ty)
+    if isinstance(expr, IntLit):
+        return ft, str(expr.value)
+    if isinstance(expr, BoolLit):
+        return "i1", "1" if expr.value else "0"
+    if isinstance(expr, CharLit):
+        return "i8", str(ord(expr.value))
+    if isinstance(expr, FloatLit):
+        return ("float" if field_ty == "float32" else "double"), f"{expr.value:.8e}"
+    if isinstance(expr, NullLit):
+        return ft, "null"
+    return None
+def _build_struct_const(struct_name: str, field_exprs: dict) -> "str | None":
+    fields_ordered = struct_field_map.get(struct_name)
+    if fields_ordered is None:
+        return None
+    parts = []
+    for fname, fty in fields_ordered:
+        fexpr = field_exprs.get(fname)
+        if fexpr is None:
+            return None
+        result = _try_literal_llvm_val(fexpr, fty)
+        if result is None:
+            return None
+        fllvm_ty, fval = result
+        parts.append(f"{fllvm_ty} {fval}")
+    inner = ", ".join(parts)
+    if struct_name in packed_struct_names:
+        return f"<{{ {inner} }}>"
+    return f"{{ {inner} }}"
+def _try_const_fold_struct_init(sinit) -> "str | None":
+    return _build_struct_const(sinit.name, dict(sinit.fields))
+def _try_const_fold_call(call_expr, ret_ty: str) -> "str | None":
+    fn = _func_name_map.get(call_expr.name)
+    if fn is None or fn.body is None or fn.is_extern:
+        return None
+    if ret_ty not in struct_field_map:
+        return None
+    if len(fn.params) != len(call_expr.args):
+        return None
+    param_exprs: dict = {}
+    for (pty, pname), aexpr in zip(fn.params, call_expr.args):
+        if _try_literal_llvm_val(aexpr, pty) is None:
+            return None
+        param_exprs[pname] = (pty, aexpr)
+    field_values: dict = {}
+    known_fields = set(fname for fname, _ in struct_field_map[ret_ty])
+    for stmt in fn.body:
+        if isinstance(stmt, Assign) and isinstance(stmt.name, FieldAccess):
+            fa = stmt.name
+            if fa.field not in known_fields:
+                continue
+            rhs = stmt.expr
+            if isinstance(rhs, Var) and rhs.name in param_exprs:
+                _pty, fexpr = param_exprs[rhs.name]
+                field_values[fa.field] = fexpr
+            elif isinstance(rhs, (IntLit, FloatLit, BoolLit, CharLit, NullLit)):
+                field_values[fa.field] = rhs
+    if len(field_values) != len(struct_field_map[ret_ty]):
+        return None
+    return _build_struct_const(ret_ty, field_values)
 def compile_program(prog: Program) -> str:
     global all_funcs, func_table, builtins_emitted, _func_name_map
     all_funcs = prog.funcs[:]
@@ -8048,6 +8111,14 @@ entry:
             )
             initializer = f"getelementptr inbounds ([{length} x i8], [{length} x i8]* {label}, i32 0, i32 0)"
             llvm_ty = "i8*"
+        elif isinstance(g.expr, StructInit):
+            folded = _try_const_fold_struct_init(g.expr)
+            if folded is not None:
+                initializer = folded
+        elif isinstance(g.expr, Call):
+            folded = _try_const_fold_call(g.expr, g.typ)
+            if folded is not None:
+                initializer = folded
         if getattr(g, "is_extern", False):
             lines.append(f"@{g.name} = external global {llvm_ty}")
             if is_array:
