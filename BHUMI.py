@@ -165,6 +165,7 @@ KEYWORDS = {
     "nomd",      "pin",       "crumble",
     "nown",
     "take",      "except",
+    "in",        "for",
     "typeswitch","typecase", "fallback",
 }
 SINGLE_CHARS = {
@@ -455,7 +456,8 @@ def ensure_monomorph_call(
         return mononame
     subst_map: Dict[str, str] = {}
     if has_type_params:
-        for (param_type, _), actual in zip(base_fn.params, arg_types):
+        for (param_type, param_name), actual in zip(base_fn.params, arg_types):
+            subst_map[param_name] = actual
             for tp in base_fn.type_params:
                 if param_type == tp:
                     subst_map[tp] = actual
@@ -574,7 +576,7 @@ def ensure_monomorph_call(
                 for case in s.cases:
                     new_body = transform_stmt_list(case.body)
                     new_cases.append(
-                        TypeSwitchCase(_subst_type(case.typ, subst_map), new_body)
+                        TypeSwitchCase(_subst_type(case.typ, subst_map), new_body, case.lineno, case.col)
                     )
                 new_fb = None
                 if s.fallback:
@@ -988,11 +990,24 @@ def lex(source: str) -> List[Token]:
                 i += 1
             continue
         if c == "/" and i + 1 < len(source) and source[i + 1] == "*":
+            comment_start_line = line
+            comment_start_col = col
             i += 2
-            while i < len(source) - 1:
-                if source[i] == "*" and source[i + 1] == "/":
+            col += 2
+            depth = 1
+            while i < len(source):
+                if i + 1 < len(source) and source[i] == "/" and source[i + 1] == "*":
+                    depth += 1
                     i += 2
-                    break
+                    col += 2
+                    continue
+                if i + 1 < len(source) and source[i] == "*" and source[i + 1] == "/":
+                    depth -= 1
+                    i += 2
+                    col += 2
+                    if depth == 0:
+                        break
+                    continue
                 if source[i] == "\n":
                     line += 1
                     col = 1
@@ -1001,7 +1016,9 @@ def lex(source: str) -> List[Token]:
                 i += 1
             else:
                 bhumi_report_error(
-                    line, None, f"Unclosed multiline comment starting at line {line}"
+                    comment_start_line,
+                    comment_start_col,
+                    "Unclosed multiline comment",
                 )
             continue
         matched = False
@@ -1264,11 +1281,26 @@ class ArrayInit(Expr):
 class TypeSwitchCase:
     typ: str
     body: List[Stmt]
+    lineno: Optional[int] = None
+    col: Optional[int] = None
 @dataclass
 class TypeSwitch(Stmt):
     subject: str
     cases: List[TypeSwitchCase]
     fallback: Optional[List[Stmt]] = None
+@dataclass
+class FunctionInsertCase:
+    typ: str
+    subject: str
+    body: List[Stmt]
+    lineno: Optional[int] = None
+    col: Optional[int] = None
+@dataclass
+class FunctionInsert(Stmt):
+    target: str
+    cases: List[FunctionInsertCase]
+    lineno: Optional[int] = None
+    col: Optional[int] = None
 @dataclass
 class IfStmt(Stmt):
     cond: Expr
@@ -1344,6 +1376,7 @@ class Program:
     structs: List[StructDef]
     enums: List[EnumDef]
     globals: List[GlobalVar]
+    inserts: List[FunctionInsert] = None
 string_constants: List[str] = []
 struct_field_map: Dict[str, List[Tuple[str, str]]] = {}
 packed_struct_names: set = set()
@@ -1425,6 +1458,7 @@ class Parser:
         structs = []
         enums = []
         globals = []
+        inserts = []
         while self.peek().kind != "EOF":
             if (
                 self.peek().kind == "IDENT"
@@ -1528,9 +1562,11 @@ class Parser:
                 structs.append(self.parse_struct_def())
             elif self.peek().kind == "ENUM":
                 enums.append(self.parse_enum_def())
+            elif self.peek().kind == "IN":
+                inserts.append(self.parse_insert())
             else:
                 funcs.append(self.parse_func())
-        self.program = Program(funcs, imports, structs, enums, globals)
+        self.program = Program(funcs, imports, structs, enums, globals, inserts)
         return self.program
     def _expect_gt(self):
         if self.peek().kind == "GT":
@@ -1928,6 +1964,8 @@ class Parser:
             return self.parse_while()
         if t.kind == "TYPESWITCH":
             return self.parse_typeswitch()
+        if t.kind == "IN":
+            return self.parse_insert()
         if self.match("CRUMBLE"):
             return self.parse_crumble()
         if t.kind == "CONTINUE":
@@ -1947,29 +1985,30 @@ class Parser:
             return _attach_pos(TakeStmt(name_tok.value), name_tok)
         return self.parse_expr_stmt()
     def parse_typeswitch(self) -> TypeSwitch:
-        self.expect("TYPESWITCH")
+        ts_tok = self.expect("TYPESWITCH")
         self.expect("LPAREN")
         if self.peek().kind not in ("IDENT", "HASH"):
             bhumi_report_error(
                 self.peek().line,
                 self.peek().col,
-                "Expected type parameter identifier or '#' in typeswitch(.)",
+                "Expected identifier or '#' in typeswitch(.)",
             )
-        subject = self.bump().value
+        subject_tok = self.bump()
+        subject = subject_tok.value
         self.expect("RPAREN")
         self.expect("LBRACE")
         cases: List[TypeSwitchCase] = []
         fallback_body: Optional[List[Stmt]] = None
         while self.peek().kind != "RBRACE":
             if self.peek().kind == "TYPECASE":
-                self.bump()
+                case_tok = self.bump()
                 self.expect("LPAREN")
                 case_typ = self.parse_type()
                 self.expect("RPAREN")
                 self.expect("LBRACE")
                 body = self.parse_block()
                 self.expect("RBRACE")
-                cases.append(TypeSwitchCase(case_typ, body))
+                cases.append(TypeSwitchCase(case_typ, body, case_tok.line, case_tok.col))
                 continue
             if self.peek().kind == "FALLBACK":
                 self.bump()
@@ -1983,7 +2022,33 @@ class Parser:
                 f"Unexpected token in typeswitch: {self.peek().kind}",
             )
         self.expect("RBRACE")
-        return TypeSwitch(subject, cases, fallback_body)
+        return _attach_pos(TypeSwitch(subject, cases, fallback_body), ts_tok)
+    def parse_insert(self) -> FunctionInsert:
+        in_tok = self.expect("IN")
+        target_tok = self.expect("IDENT")
+        self.expect("LBRACE")
+        cases: List[FunctionInsertCase] = []
+        while self.peek().kind != "RBRACE":
+            case_tok = self.expect("TYPECASE")
+            self.expect("LPAREN")
+            case_typ = self.parse_type()
+            self.expect("RPAREN")
+            self.expect("FOR")
+            self.expect("LPAREN")
+            if self.peek().kind not in ("IDENT", "HASH"):
+                bhumi_report_error(
+                    self.peek().line,
+                    self.peek().col,
+                    "Expected identifier or '#' in typecase(... ) for(...)",
+                )
+            subject = self.bump().value
+            self.expect("RPAREN")
+            self.expect("LBRACE")
+            body = self.parse_block()
+            self.expect("RBRACE")
+            cases.append(FunctionInsertCase(case_typ, subject, body, case_tok.line, case_tok.col))
+        self.expect("RBRACE")
+        return _attach_pos(FunctionInsert(target_tok.value, cases), in_tok)
     def parse_compound_assign(self) -> Assign:
         name = self.expect("IDENT").value
         op_token = self.bump()
@@ -3554,10 +3619,57 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
         lhs = gen_expr(expr.left, out)
         lt = infer_type(expr.left)
         rhs = gen_expr(expr.right, out)
-        ty = lt
-        if ty == "string" and expr.op == "+":
-            lhs_nn = _nonnull_string_value(lhs)
-            rhs_nn = _nonnull_string_value(rhs)
+        rt = infer_type(expr.right)
+        if expr.op == "+" and (lt == "string" or rt == "string"):
+            def _stringify_for_concat(val: str, typ: str) -> Tuple[str, bool]:
+                if typ == "string":
+                    return _nonnull_string_value(val), False
+                if typ == "bool":
+                    tmp = new_tmp()
+                    out.append(f"  {tmp} = call i8* @btostr(i1 {val})")
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp})")
+                    return tmp, True
+                if typ == "float32":
+                    tmp = new_tmp()
+                    out.append(f"  {tmp} = call i8* @f32tostr(float {val})")
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp})")
+                    return tmp, True
+                if typ == "float":
+                    tmp = new_tmp()
+                    out.append(f"  {tmp} = call i8* @ftostr(double {val})")
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp})")
+                    return tmp, True
+                int_str_fns = {
+                    "int8": "i8tostr",
+                    "int16": "i16tostr",
+                    "int32": "i32tostr",
+                    "int64": "i64tostr",
+                    "int": "itostr",
+                }
+                if typ in int_str_fns:
+                    tmp = new_tmp()
+                    out.append(f"  {tmp} = call i8* @{int_str_fns[typ]}({llvm_ty_of(typ)} {val})")
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp})")
+                    return tmp, True
+                if typ.startswith("uint"):
+                    casted = emit_cast_value(val, typ, "int", out)
+                    tmp = new_tmp()
+                    out.append(f"  {tmp} = call i8* @itostr(i64 {casted})")
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp})")
+                    return tmp, True
+                if llvm_ty_of(typ).startswith("i") and not llvm_ty_of(typ).endswith("*"):
+                    casted = emit_cast_value(val, typ, "int", out)
+                    tmp = new_tmp()
+                    out.append(f"  {tmp} = call i8* @itostr(i64 {casted})")
+                    out.append(f"  call void @bhumi_ctbl_insert(i8* {tmp})")
+                    return tmp, True
+                bhumi_report_error(
+                    getattr(expr, "lineno", None),
+                    getattr(expr, "col", None),
+                    f"String concatenation requires string/bool/numeric operands, got '{typ}'",
+                )
+            lhs_nn, lhs_owned = _stringify_for_concat(lhs, lt)
+            rhs_nn, rhs_owned = _stringify_for_concat(rhs, rt)
             len_l = new_tmp()
             out.append(f"  {len_l} = call i64 @strlen(i8* {lhs_nn})")
             len_r = new_tmp()
@@ -3587,6 +3699,10 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
             out.append(f"  store i8 0, i8* {term_ptr}")
             _maybe_flush_deferred(expr.left, lhs)
             _maybe_flush_deferred(expr.right, rhs)
+            if lhs_owned:
+                out.append(f"  call void @bhumi_safe_c_free(i8* {lhs_nn})")
+            if rhs_owned:
+                out.append(f"  call void @bhumi_safe_c_free(i8* {rhs_nn})")
             _emit_free_if_temp(expr.left, lhs)
             _emit_free_if_temp(expr.right, rhs)
             return raw
@@ -9838,15 +9954,17 @@ def check_types(prog: Program):
                         getattr(stmt, "lineno", None),
                         getattr(stmt, "col", None),
                         "typeswitch subject '#' is only allowed in functions whose declared return type is the caller-placeholder '<#>'.\n "
-                        "Either change the function to return '<#>' (e.g. `fn foo() <#> { ... }`) or switch on a type parameter instead (e.g. `typeswitch(T)`).",
+                        "Either change the function to return '<#>' (e.g. `fn foo() <#> { ... }`) or switch on a parameter or type parameter instead (e.g. `typeswitch(candidate)` or `typeswitch(T)`).",
                     )
             else:
-                if func is not None and stmt.subject not in (func.type_params or []):
-                    bhumi_report_error(
-                        getattr(stmt, "lineno", None),
-                        getattr(stmt, "col", None),
-                        f"typeswitch subject '{stmt.subject}' is not a type parameter",
-                    )
+                if func is not None:
+                    valid_subjects = set(func.type_params or []) | {pname for _, pname in (func.params or [])}
+                    if stmt.subject not in valid_subjects:
+                        bhumi_report_error(
+                            getattr(stmt, "lineno", None),
+                            getattr(stmt, "col", None),
+                            f"typeswitch subject '{stmt.subject}' is not a function parameter or type parameter",
+                        )
             for case in stmt.cases:
                 base_type = case.typ.rstrip("*")
                 if "[" in base_type and base_type.endswith("]"):
@@ -10585,6 +10703,68 @@ class AsyncStateMachine:
             lines.append("  ret i1 1")
         lines.append("}")
         return lines
+def _clone_stmt_list(stmts: List[Stmt]) -> List[Stmt]:
+    return list(stmts or [])
+def _find_typeswitch_targets(stmts: List[Stmt], subject: str):
+    found = []
+    for idx, st in enumerate(stmts or []):
+        if isinstance(st, TypeSwitch) and st.subject == subject:
+            found.append((idx, st))
+        elif isinstance(st, IfStmt):
+            found.extend(_find_typeswitch_targets(st.then_body or [], subject))
+            if st.else_body:
+                if isinstance(st.else_body, IfStmt):
+                    found.extend(_find_typeswitch_targets([st.else_body], subject))
+                else:
+                    found.extend(_find_typeswitch_targets(st.else_body, subject))
+        elif isinstance(st, WhileStmt):
+            found.extend(_find_typeswitch_targets(st.body or [], subject))
+    return found
+def _apply_function_inserts_to_body(body: List[Stmt], inserts: List[FunctionInsert], fn: Func) -> List[Stmt]:
+    if not inserts:
+        return body
+    new_body = list(body or [])
+    for ins in inserts:
+        for case in ins.cases:
+            matches = _find_typeswitch_targets(new_body, case.subject)
+            if not matches:
+                bhumi_report_error(
+                    getattr(ins, 'lineno', None),
+                    getattr(ins, 'col', None),
+                    f"Function '{fn.name}' has no typeswitch subject '{case.subject}' to insert into",
+                )
+            if len(matches) > 1:
+                locs = []
+                for _, ts in matches:
+                    locs.append(f"line {getattr(ts, 'lineno', '?')}, col {getattr(ts, 'col', '?')}")
+                bhumi_report_error(
+                    getattr(ins, 'lineno', None),
+                    getattr(ins, 'col', None),
+                    f"Function '{fn.name}' has multiple typeswitch blocks for subject '{case.subject}': " + '; '.join(locs),
+                )
+            _, target = matches[0]
+            conflicts = [(getattr(existing, 'lineno', None), getattr(existing, 'col', None)) for existing in target.cases if existing.typ == case.typ]
+            if conflicts:
+                msg = [
+                    f"Duplicate typecase '{case.typ}' inserted into function '{fn.name}' for subject '{case.subject}'",
+                    'Conflicting definitions are at:',
+                ]
+                for ln, col in conflicts:
+                    msg.append(f"  - line {ln}, col {col}")
+                msg.append('Resolve the conflict by choosing one definition, modifying one of them, or discarding one.')
+                bhumi_report_error(getattr(ins, 'lineno', None), getattr(ins, 'col', None), "\n".join(msg))
+            target.cases.append(TypeSwitchCase(case.typ, _clone_stmt_list(case.body), case.lineno, case.col))
+    return new_body
+def _apply_function_inserts(funcs: List[Func], inserts: List[FunctionInsert]) -> None:
+    if not inserts:
+        return
+    by_target: Dict[str, List[FunctionInsert]] = {}
+    for ins in inserts:
+        by_target.setdefault(ins.target, []).append(ins)
+    for fn in funcs:
+        if fn.body is None or fn.name not in by_target:
+            continue
+        fn.body = _apply_function_inserts_to_body(fn.body, by_target[fn.name], fn)
 def main():
     global all_funcs, func_table, builtins_emitted
     global tmp_id, label_id
@@ -10622,7 +10802,8 @@ def main():
     all_structs = []
     all_enums = []
     all_globals = []
-    def load_imports_recursively(prog, all_funcs, all_structs, all_enums, all_globals):
+    all_inserts = []
+    def load_imports_recursively(prog, all_funcs, all_structs, all_enums, all_globals, all_inserts):
         for imp in prog.imports:
             candidates = []
             if imp.endswith(".bu"):
@@ -10670,27 +10851,31 @@ def main():
                 finally:
                     compiled = previous_compiled
             load_imports_recursively(
-                sub_prog, all_funcs, all_structs, all_enums, all_globals
+                sub_prog, all_funcs, all_structs, all_enums, all_globals, all_inserts
             )
             all_structs.extend(sub_prog.structs)
             all_enums.extend(sub_prog.enums)
             all_globals.extend(sub_prog.globals)
+            all_inserts.extend(getattr(sub_prog, "inserts", []) or [])
             for func in sub_prog.funcs:
                 sig = (func.name, len(func.params), func.is_extern)
                 if sig not in seen_func_signatures:
                     all_funcs.append(func)
                     seen_func_signatures.add(sig)
-    load_imports_recursively(main_prog, all_funcs, all_structs, all_enums, all_globals)
+    load_imports_recursively(main_prog, all_funcs, all_structs, all_enums, all_globals, all_inserts)
     all_funcs.extend(main_prog.funcs)
     all_structs.extend(main_prog.structs)
     all_enums.extend(main_prog.enums)
     all_globals.extend(main_prog.globals)
+    all_inserts.extend(getattr(main_prog, "inserts", []) or [])
+    _apply_function_inserts(all_funcs, all_inserts)
     final_prog = Program(
         funcs=all_funcs,
         imports=main_prog.imports,
         structs=all_structs,
         enums=all_enums,
         globals=all_globals,
+        inserts=all_inserts,
     )
     seen_names = {}
     for idx, fn in enumerate(final_prog.funcs):
