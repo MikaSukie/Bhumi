@@ -4468,7 +4468,8 @@ def gen_expr(expr: Expr, out: List[str], expected: Optional[str] = None) -> str 
                 and not call_target.startswith("bhumi_")
                 and not call_target.startswith("llvm.")
             )
-            if ret_ty == "i8*" and _is_extern_call:
+            _declared_ret = getattr(concrete_fn, "ret_type", None) if concrete_fn else None
+            if ret_ty == "i8*" and _is_extern_call and _declared_ret != "void*":
                 _null_chk = new_tmp()
                 _ins_skip = new_label("ctbl_ins_skip")
                 _ins_do   = new_label("ctbl_ins_do")
@@ -5380,7 +5381,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                         stmt.expr.name in _NOWN_BUILTIN_FUNCS
                         or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
                     )
-                    if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee:
+                    if ret_t is not None and (ret_t == "string" or (ret_t.endswith("*") and ret_t != "void*")) and not _nown_callee:
                         owned_vars.add(stmt.name)
                         if stmt.name in crumb_runtime:
                             crumb_runtime[stmt.name]["owned"] = True
@@ -5445,7 +5446,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     stmt.expr.name in _NOWN_BUILTIN_FUNCS
                     or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
                 )
-                if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_callee2:
+                if ret_t is not None and (ret_t == "string" or (ret_t.endswith("*") and ret_t != "void*")) and not _nown_callee2:
                     owned_vars.add(stmt.name)
                     if stmt.name in crumb_runtime:
                         crumb_runtime[stmt.name]["owned"] = True
@@ -5678,7 +5679,7 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
                     stmt.expr.name in _NOWN_BUILTIN_FUNCS
                     or getattr(_func_name_map.get(stmt.expr.name), "is_nown", False)
                 )
-                if ret_t is not None and (ret_t.endswith("*") or ret_t == "string") and not _nown_assign:
+                if ret_t is not None and (ret_t == "string" or (ret_t.endswith("*") and ret_t != "void*")) and not _nown_assign:
                     owned_vars.add(vn)
                     if vn in crumb_runtime:
                         crumb_runtime[vn]["owned"] = True
