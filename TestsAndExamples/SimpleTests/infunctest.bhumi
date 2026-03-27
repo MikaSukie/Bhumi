@@ -1,0 +1,22 @@
+import C_std;
+
+fn main() <int> {
+    int8 f = 0;
+    printnl(tostring(f));
+    int age = input("what is your age? ");
+    printnl("you are " + age + " years old");
+}
+in tostring {
+    typecase(int8) for (candidate) {
+        /*if duplicate type implementation found, error with the locations of both or more conflicts and just prompt to choose one, modify, or discard.*/
+        return i8tostr(candidate);
+    }
+    // typecase(int8)  { return i8tostr(candidate);  }
+}
+
+in input {
+    typecase(int) for (#) {
+        return iinput(s);
+    }
+    // typecase(int)   { return iinput(s); }
+}
