@@ -5776,6 +5776,23 @@ def gen_stmt(stmt: Stmt, out: List[str], ret_ty: str):
             f"  {ptr_tmp} = getelementptr inbounds {llvm_ty}, {llvm_ty}* {arr_addr_token}, i32 0, i32 {idx_cast}"
         )
         out.append(f"  store {base_ty} {val}, {base_ty}* {ptr_tmp}")
+        if base_ty.endswith("*") and base_ty != "void*":
+            if isinstance(stmt.value, Var):
+                _src_vn = stmt.value.name
+                if _src_vn in owned_vars:
+                    owned_vars.discard(_src_vn)
+                    _src_res = symbol_table.lookup(_src_vn)
+                    if _src_res is not None:
+                        _src_llvm_ia, _src_ir_ia = _src_res
+                        _src_addr_ia = (
+                            _src_ir_ia
+                            if _src_ir_ia.startswith("@")
+                            else f"%{_src_ir_ia}_addr"
+                        )
+                        out.append(
+                            f"  store {_src_llvm_ia} null,"
+                            f" {_src_llvm_ia}* {_src_addr_ia}"
+                        )
     elif isinstance(stmt, IfStmt):
         cond = gen_expr(stmt.cond, out, expected="bool")
         then_lbl = new_label("then")
